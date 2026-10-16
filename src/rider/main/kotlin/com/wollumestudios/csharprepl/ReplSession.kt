@@ -7,9 +7,12 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
+import com.wollumestudios.csharprepl.host.AddReferenceResponse
 import com.wollumestudios.csharprepl.host.AnalyzeResponse
 import com.wollumestudios.csharprepl.host.ExpandResponse
 import com.wollumestudios.csharprepl.host.HostLocator
@@ -19,7 +22,9 @@ import com.wollumestudios.csharprepl.host.RestoreScriptResponse
 import com.wollumestudios.csharprepl.host.RunResponse
 import com.wollumestudios.csharprepl.host.Var
 import com.wollumestudios.csharprepl.host.VariablesResponse
+import com.wollumestudios.csharprepl.refs.ProjectChangeListener
 import com.wollumestudios.csharprepl.settings.ReplSettings
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
@@ -42,6 +47,13 @@ data class HistoryEntry(
 }
 
 enum class RestartMode { Empty, Replay, Restore }
+
+/** A referenced project as the change watcher sees it: its directory and ProjectReference closure, and when it was (re)built. */
+data class WatchedProject(val name: String, val dirs: List<String>, val since: Long)
+
+/** Short name for messages: the project name, the DLL file name, or "Package version". */
+val ReferenceInfo.displayName: String
+    get() = if (kind == "nuget") "$pathOrName $version" else File(pathOrName).let { if (kind == "project") it.nameWithoutExtension else it.name }
 
 /**
  * The project's REPL session: owns the host process, the history, pending code, references and the last variables.
@@ -67,12 +79,26 @@ class ReplSession(private val project: Project) : Disposable {
     /** True while Enter waits for `analyze`: actions that read or change pending/input are disabled meanwhile. */
     var analyzing = false
         private set
+    /** Re-added in this order on every host start. Change it through [addReference] / [removeReference]. */
     val references = mutableListOf<ReferenceInfo>()
+    private val projectDirs = mutableMapOf<ReferenceInfo, WatchedProject>()
+    /** Snapshot of the referenced projects for the change watcher, which reads it off the EDT. */
+    @Volatile var watched: List<WatchedProject> = emptyList()
+        private set
+    /** The referenced project the banner reports as changed, or null (no banner). */
+    var changedProject: String? = null
+        private set
+    /** "Ignore for this session": no banner until the next [reset]. */
+    var ignoreUntilReset = false
     var pending = ""
         private set
     var variables: List<Var> = emptyList()
         private set
     val running get() = inFlight.isNotEmpty()
+
+    init {
+        ProjectChangeListener.watchBuilds(project, this)
+    }
 
     fun addListener(parent: Disposable, onChanged: () -> Unit) {
         listeners += onChanged
@@ -171,6 +197,7 @@ class ReplSession(private val project: Project) : Disposable {
     fun reset() {
         entries.clear()
         resets++
+        ignoreUntilReset = false
         setPending("")
         restart(RestartMode.Empty)
     }
@@ -180,6 +207,8 @@ class ReplSession(private val project: Project) : Disposable {
      * [RestartMode.Restore] runs the old host's restore script (type declarations and variables as code). Both run visibly.
      */
     fun restart(mode: RestartMode) {
+        changedProject = null // the new host rebuilds the references
+        changed()
         when (mode) {
             RestartMode.Empty -> replaceHost()
             RestartMode.Replay -> {
@@ -198,11 +227,63 @@ class ReplSession(private val project: Project) : Disposable {
                         val r = gson.fromJson(json, RestoreScriptResponse::class.java)
                         append(HistoryEntry.note("Session restarted, restoring variables"))
                         submit(r.code)
-                        if (!r.notReproducible.isNullOrEmpty()) append(HistoryEntry.note("Not restored: ${r.notReproducible.joinToString()}"))
+                        if (!r.notReproducible.isNullOrEmpty()) notify(project, "Not restored: ${r.notReproducible.joinToString()}", NotificationType.WARNING)
                     }
                 }
             }
         }
+    }
+
+    /** Builds or copies [ref] into the running session (a note shows meanwhile); on success later hosts re-add it too. */
+    fun addReference(ref: ReferenceInfo) {
+        if (ref in references) return append(HistoryEntry.note("${ref.displayName} is already referenced"))
+        start()
+        val gen = generation
+        append(HistoryEntry.note(if (ref.kind == "dll") "Referencing ${ref.displayName}…" else "Building ${ref.displayName}…"))
+        request("addReference", referenceFields(ref)).whenComplete { json, error ->
+            onEdt {
+                when {
+                    gen != generation -> append(HistoryEntry.note("${ref.displayName} not referenced: the session restarted meanwhile"))
+                    json == null -> append(HistoryEntry.note("${ref.displayName} not referenced: ${(error?.cause ?: error)?.message}"))
+                    ref in references -> {} // dropped twice while building
+                    else -> {
+                        references += ref
+                        watch(ref, json)
+                        append(HistoryEntry.note("Referenced ${ref.displayName}"))
+                    }
+                }
+            }
+        }
+    }
+
+    /** Drops [ref] and restarts the host without it (variables are lost; the caller asked the user). */
+    fun removeReference(ref: ReferenceInfo) {
+        if (!references.remove(ref)) return
+        projectDirs.remove(ref)
+        watched = projectDirs.values.toList()
+        restart(RestartMode.Empty)
+        append(HistoryEntry.note("Removed ${ref.displayName}; session restarted, variables lost"))
+    }
+
+    /** From the change watcher: shows the banner for [name] unless one is up (one per burst) or changes are ignored. */
+    fun projectChanged(name: String) {
+        if (changedProject != null || ignoreUntilReset || ReplSettings.state.ignoreChangesForever || watched.none { it.name == name }) return
+        changedProject = name
+        changed()
+    }
+
+    /** Ignore: hides the banner until the next change. */
+    fun dismissChange() {
+        if (changedProject == null) return
+        changedProject = null
+        changed()
+    }
+
+    private fun watch(ref: ReferenceInfo, json: JsonObject) {
+        if (ref.kind != "project") return
+        val dirs = gson.fromJson(json, AddReferenceResponse::class.java).sourceDirs.orEmpty()
+        projectDirs[ref] = WatchedProject(ref.displayName, dirs, System.currentTimeMillis())
+        watched = projectDirs.values.toList()
     }
 
     override fun dispose() {
@@ -232,8 +313,12 @@ class ReplSession(private val project: Project) : Disposable {
             null
         } ?: return
         references.forEach { ref -> // queued in order, before any run
-            request("addReference", referenceFields(ref)).whenComplete { _, error ->
-                if (error != null) onEdt { if (gen == generation) append(HistoryEntry.note("Reference ${ref.pathOrName} not re-added: ${(error.cause ?: error).message}")) }
+            request("addReference", referenceFields(ref)).whenComplete { json, error ->
+                onEdt {
+                    if (gen != generation || ref !in references) return@onEdt
+                    if (json != null) watch(ref, json) // rebuilt now: later builds compare against this
+                    else append(HistoryEntry.note("Reference ${ref.displayName} not re-added: ${(error?.cause ?: error)?.message}"))
+                }
             }
         }
     }
@@ -288,6 +373,9 @@ class ReplSession(private val project: Project) : Disposable {
         private val LOG = logger<ReplSession>()
 
         fun getInstance(project: Project) = project.service<ReplSession>()
+
+        fun notify(project: Project, text: String, type: NotificationType = NotificationType.INFORMATION) =
+            NotificationGroupManager.getInstance().getNotificationGroup("CSharpRepl").createNotification(text, type).notify(project)
 
         fun referenceFields(ref: ReferenceInfo): Map<String, Any?> = when (ref.kind) {
             "nuget" -> mapOf("kind" to ref.kind, "name" to ref.pathOrName, "version" to ref.version)

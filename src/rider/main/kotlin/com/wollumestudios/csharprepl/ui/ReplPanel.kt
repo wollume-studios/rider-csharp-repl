@@ -20,6 +20,8 @@ import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.editor.colors.EditorFontType
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.editor.ex.EditorEx
+import com.intellij.openapi.editor.impl.EditorImpl
+import com.wollumestudios.csharprepl.refs.ReferenceDrop
 import com.intellij.openapi.editor.highlighter.EditorHighlighterFactory
 import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
@@ -65,9 +67,12 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private val csharp = FileTypeManager.getInstance().getFileTypeByExtension("cs")
     private val syntax = csharpHighlighter(project)
+    private val drop = ReferenceDrop(project)
+    private val banner = ChangeBanner()
 
     private val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
         UndoUtil.disableUndoFor(document)
+        (this as? EditorImpl)?.setDropHandler(drop)
         settings.apply {
             isLineNumbersShown = false
             isFoldingOutlineShown = false
@@ -87,6 +92,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     val input: EditorTextField = object : EditorTextField(EditorFactory.getInstance().createDocument(""), project, csharp, false, false) {
         override fun createEditor(): EditorEx = super.createEditor().apply {
             highlighter = EditorHighlighterFactory.getInstance().createEditorHighlighter(syntax, colorsScheme)
+            (this as? EditorImpl)?.setDropHandler(drop)
             settings.isLineNumbersShown = false
             settings.additionalLinesCount = 0
             setVerticalScrollbarVisible(true)
@@ -128,7 +134,11 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             add(bottom, BorderLayout.SOUTH)
         }
         splitter.secondComponent = variables
-        setContent(splitter)
+        setContent(JPanel(BorderLayout()).apply {
+            add(banner, BorderLayout.NORTH) // the banner slot
+            add(splitter, BorderLayout.CENTER)
+        })
+        transferHandler = drop
 
         val group = ActionManager.getInstance().getAction("CSharpRepl.Toolbar") as ActionGroup
         toolbar = ActionManager.getInstance().createActionToolbar("CSharpReplToolbar", group, true).also { it.targetComponent = this }.component
@@ -236,6 +246,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         }
         pendingText.text = session.pending
         pendingBox.isVisible = session.pending.isNotEmpty()
+        banner.show(session.changedProject)
         if (session.variables !== shownVariables) {
             shownVariables = session.variables
             variables.show(session.variables)

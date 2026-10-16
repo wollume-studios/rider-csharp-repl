@@ -15,7 +15,13 @@
                     factoryClass="com.wollumestudios.csharprepl.ui.ReplToolWindowFactory"/>
         <applicationConfigurable parentId="tools" id="com.wollumestudios.csharprepl.settings" displayName="C# REPL"
                                  instance="com.wollumestudios.csharprepl.settings.ReplConfigurable"/>
+        <notificationGroup id="CSharpRepl" displayType="BALLOON"/>
     </extensions>
+
+    <projectListeners>
+        <!-- Saved / externally changed files of referenced projects → change banner (builds: ProjectChangeListener.watchBuilds). -->
+        <listener class="com.wollumestudios.csharprepl.refs.ProjectChangeListener" topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </projectListeners>
 
     <actions>
         <action id="CSharpRepl.Run" class="com.wollumestudios.csharprepl.actions.RunAction"/>
@@ -28,13 +34,32 @@
         <action id="CSharpRepl.Enter" class="com.wollumestudios.csharprepl.actions.EnterKeyAction"/>
         <action id="CSharpRepl.ShiftEnter" class="com.wollumestudios.csharprepl.actions.ShiftEnterKeyAction"/>
         <action id="CSharpRepl.ClearInput" class="com.wollumestudios.csharprepl.actions.ClearInputAction"/>
+        <action id="CSharpRepl.AddReference" class="com.wollumestudios.csharprepl.actions.AddReferenceAction"/>
+        <action id="CSharpRepl.ReferenceInRepl" class="com.wollumestudios.csharprepl.actions.ReferenceInReplAction">
+            <add-to-group group-id="SolutionExplorerPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </action>
+        <action id="CSharpRepl.Rebuild" class="com.wollumestudios.csharprepl.actions.RebuildAction"/>
+        <action id="CSharpRepl.RebuildReplay" class="com.wollumestudios.csharprepl.actions.RebuildReplayAction"/>
+        <action id="CSharpRepl.RebuildRestore" class="com.wollumestudios.csharprepl.actions.RebuildRestoreAction"/>
+        <action id="CSharpRepl.Ignore" class="com.wollumestudios.csharprepl.actions.IgnoreChangeAction"/>
+        <action id="CSharpRepl.IgnoreForSession" class="com.wollumestudios.csharprepl.actions.IgnoreForSessionAction"/>
+        <action id="CSharpRepl.IgnoreChangesForever" class="com.wollumestudios.csharprepl.actions.IgnoreChangesForeverAction"/>
+        <group id="CSharpRepl.Gear" text="Options" description="References and settings" popup="true" icon="AllIcons.General.Settings">
+            <group id="CSharpRepl.References" class="com.wollumestudios.csharprepl.actions.ReferencesGroup"/>
+            <reference ref="CSharpRepl.AddReference"/>
+            <separator/>
+            <reference ref="CSharpRepl.IgnoreChangesForever"/>
+            <reference ref="CSharpRepl.Settings"/>
+        </group>
         <group id="CSharpRepl.Toolbar" text="C# REPL">
             <reference ref="CSharpRepl.Run"/>
             <reference ref="CSharpRepl.Stop"/>
             <reference ref="CSharpRepl.ToggleAutoRun"/>
             <reference ref="CSharpRepl.Reset"/>
             <separator/>
-            <reference ref="CSharpRepl.Settings"/>
+            <reference ref="CSharpRepl.AddReference"/>
+            <reference ref="CSharpRepl.Gear"/>
         </group>
     </actions>
 </idea-plugin>

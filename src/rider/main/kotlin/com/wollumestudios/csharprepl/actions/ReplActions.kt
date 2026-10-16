@@ -1,12 +1,38 @@
 package com.wollumestudios.csharprepl.actions
 
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.Separator
+import com.intellij.openapi.components.serviceIfCreated
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.ShowSettingsUtil
+import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.DumbAwareToggleAction
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.DialogWrapper
+import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.platform.backend.workspace.WorkspaceModel
+import com.intellij.ui.components.JBTextField
+import com.intellij.ui.dsl.builder.COLUMNS_MEDIUM
+import com.intellij.ui.dsl.builder.COLUMNS_SHORT
+import com.intellij.ui.dsl.builder.columns
+import com.intellij.ui.dsl.builder.panel
+import com.jetbrains.rider.projectView.workspace.findProjects
+import com.jetbrains.rider.projectView.workspace.getFile
 import com.wollumestudios.csharprepl.ReplSession
+import com.wollumestudios.csharprepl.RestartMode
+import com.wollumestudios.csharprepl.displayName
+import com.wollumestudios.csharprepl.host.ReferenceInfo
+import com.wollumestudios.csharprepl.refs.ReferenceDrop
+import com.wollumestudios.csharprepl.ui.ReplToolWindowFactory
 import com.wollumestudios.csharprepl.settings.ReplConfigurable
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import com.wollumestudios.csharprepl.ui.ReplPanel
@@ -94,6 +120,116 @@ class ClearInputAction : InputAction("Clear C# REPL Input", "Clear the input fie
     }
     override fun actionPerformed(e: AnActionEvent) {
         ReplPanel.of(e.project ?: return)?.clearInput()
+    }
+}
+
+/** + Reference: a popup with the solution's projects, "DLL…" and "NuGet package…". Same effect as a drop. */
+class AddReferenceAction : DumbAwareAction("Add Reference…", "Reference a solution project, a DLL or a NuGet package in the C# REPL", AllIcons.General.Add) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val session = ReplSession.getInstance(project)
+        // Rider's frontend project model (workspace model): every project entity of the solution, by its project file.
+        val projects = WorkspaceModel.getInstance(project).findProjects().mapNotNull { it.getFile() }
+            .filter { it.extension.equals("csproj", true) }.distinct().sortedBy { it.nameWithoutExtension.lowercase() }
+        val group = DefaultActionGroup().apply {
+            projects.forEach { f -> add(DumbAwareAction.create(f.nameWithoutExtension) { session.addReference(ReferenceInfo("project", f.path, null)) }) }
+            if (projects.isNotEmpty()) addSeparator()
+            add(DumbAwareAction.create("DLL…") { chooseDll(project)?.let(session::addReference) })
+            add(DumbAwareAction.create("NuGet package…") { askNuGet(project)?.let(session::addReference) })
+        }
+        val popup = JBPopupFactory.getInstance().createActionGroupPopup("Add Reference", group, e.dataContext, JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, true)
+        val anchor = e.inputEvent?.component
+        if (anchor != null && anchor.isShowing) popup.showUnderneathOf(anchor) else popup.showCenteredInCurrentWindow(project)
+    }
+
+    private fun chooseDll(project: Project): ReferenceInfo? =
+        FileChooser.chooseFile(FileChooserDescriptorFactory.createSingleFileDescriptor("dll").withTitle("Reference DLL"), project, null)
+            ?.let { ReferenceInfo("dll", it.path, null) }
+
+    private fun askNuGet(project: Project): ReferenceInfo? {
+        lateinit var name: JBTextField
+        lateinit var version: JBTextField
+        val form = panel {
+            row("Name:") { name = textField().columns(COLUMNS_MEDIUM).focused().validationOnApply { if (it.text.isBlank()) error("Enter the package name") else null }.component }
+            row("Version:") { version = textField().columns(COLUMNS_SHORT).validationOnApply { if (it.text.isBlank()) error("Enter the package version") else null }.component }
+        }
+        val dialog = object : DialogWrapper(project) {
+            init {
+                title = "Reference NuGet Package"
+                init()
+            }
+            override fun createCenterPanel() = form
+            override fun doValidateAll() = form.validateAll()
+        }
+        if (!dialog.showAndGet()) return null
+        if (name.text.isBlank() || version.text.isBlank()) return null
+        return ReferenceInfo("nuget", name.text.trim(), version.text.trim())
+    }
+}
+
+/** Solution Explorer / Project view: "Reference in C# REPL" on project nodes only. */
+class ReferenceInReplAction : DumbAwareAction("Reference in C# REPL", "Build this project and reference it in the C# REPL session", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && ReferenceDrop.projectFiles(e.dataContext).isNotEmpty()
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        ReferenceDrop.projectFiles(e.dataContext).forEach { ReplSession.getInstance(project).addReference(ReferenceInfo("project", it.path, null)) }
+        ToolWindowManager.getInstance(project).getToolWindow(ReplToolWindowFactory.ID)?.show() // "Building …" shows there
+    }
+}
+
+/** ⚙ menu: one submenu per reference, each with Remove (which restarts the session after asking). */
+class ReferencesGroup : ActionGroup(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.EDT // references belong to the EDT
+    override fun getChildren(e: AnActionEvent?): Array<AnAction> {
+        val refs = e?.project?.serviceIfCreated<ReplSession>()?.references?.toList().orEmpty()
+        if (refs.isEmpty()) return EMPTY_ARRAY
+        return arrayOf<AnAction>(Separator.create("References")) +
+            refs.map { DefaultActionGroup("${it.displayName} (${it.kind})", listOf(RemoveReferenceAction(it))).apply { isPopup = true } } +
+            Separator.create()
+    }
+}
+
+class RemoveReferenceAction(private val ref: ReferenceInfo) : DumbAwareAction("Remove", "Remove ${ref.displayName} from the session (restarts it)", AllIcons.General.Remove) {
+    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        if (Messages.showYesNoDialog(project, "Removing a reference resets the session. Reset now?", "Remove ${ref.displayName}", Messages.getQuestionIcon()) == Messages.YES)
+            ReplSession.getInstance(project).removeReference(ref)
+    }
+}
+
+/** Banner choices, also reachable without the banner (Find Action, UI tests). Rebuild = restart: the new host rebuilds every reference. */
+abstract class SessionAction(text: String, description: String, private val run: (ReplSession) -> Unit) : DumbAwareAction(text, description, null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        e.session?.let(run)
+    }
+}
+
+class RebuildAction : SessionAction("Rebuild References and Restart", "Rebuild the referenced projects; empty session, references kept", { it.restart(RestartMode.Empty) })
+class RebuildReplayAction : SessionAction("Rebuild References and Replay", "Rebuild, restart, then rerun the successful commands in order", { it.restart(RestartMode.Replay) })
+class RebuildRestoreAction : SessionAction("Rebuild References and Restore Variables", "Rebuild, restart, then run the session's type declarations and variables as code (visibly)", { it.restart(RestartMode.Restore) })
+class IgnoreChangeAction : SessionAction("Ignore Referenced Project Change", "Hide the banner until the next change", { it.dismissChange() })
+class IgnoreForSessionAction : SessionAction("Ignore Referenced Project Changes for This Session", "No banner until the next Reset", { it.ignoreUntilReset = true; it.dismissChange() })
+
+/** "Ignore forever" (banner) and its switch back (⚙ menu, Settings › Tools › C# REPL). */
+class IgnoreChangesForeverAction : DumbAwareToggleAction("Ignore Referenced Project Changes Forever", "Never show the banner when a referenced project changes", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun isSelected(e: AnActionEvent) = ReplSettings.state.ignoreChangesForever
+    override fun setSelected(e: AnActionEvent, state: Boolean) {
+        ReplSettings.state.ignoreChangesForever = state
+        ReplSettings.changed()
+        if (state) e.project?.serviceIfCreated<ReplSession>()?.dismissChange()
     }
 }
 

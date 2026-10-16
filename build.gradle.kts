@@ -68,6 +68,7 @@ dependencies {
             useInstaller = false
         }
         jetbrainsRuntime()
+        bundledModule("intellij.rider.rdclient.dotnet") // Rider's frontend project model: ProjectModelEntity, ProjectModelDataKeys
     }
     // Gson ships with the platform (main must not bundle its own); the plain unit tests have no platform.
     compileOnly("com.google.code.gson:gson:2.11.0")
