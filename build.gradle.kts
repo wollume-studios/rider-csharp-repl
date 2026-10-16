@@ -61,6 +61,7 @@ val uiTest by tasks.registering(Test::class) {
             "-Dcsharprepl.sample=${file("samples/SampleSolution").absolutePath}",
             // Sample copies and their build output: on disk, not in a small /tmp RAM disk.
             "-Djava.io.tmpdir=${layout.buildDirectory.dir("ui-test-tmp").get().asFile.apply { mkdirs() }.absolutePath}",
+            "-Dcsharprepl.screenshots=${layout.buildDirectory.dir("screenshots").get().asFile.absolutePath}",
             rider.orNull?.let { "-Dcsharprepl.rider=$it" },
         )
     }

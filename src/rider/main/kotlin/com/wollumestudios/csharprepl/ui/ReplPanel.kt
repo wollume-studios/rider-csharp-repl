@@ -350,7 +350,12 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             return PlainSyntaxHighlighter()
         }
 
+        /**
+         * The window's panel, or null before the window was first shown. contentManagerIfCreated, not contentManager:
+         * the latter creates the content, and actions call this from update() (Find Action, popups), where a failed or cancelled
+         * update used up the platform's one call of the factory and left the window empty ("Nothing to show").
+         */
         fun of(project: Project): ReplPanel? =
-            ToolWindowManager.getInstance(project).getToolWindow(ReplToolWindowFactory.ID)?.contentManager?.getContent(0)?.component as? ReplPanel
+            ToolWindowManager.getInstance(project).getToolWindow(ReplToolWindowFactory.ID)?.contentManagerIfCreated?.getContent(0)?.component as? ReplPanel
     }
 }

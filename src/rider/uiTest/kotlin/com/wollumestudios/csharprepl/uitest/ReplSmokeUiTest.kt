@@ -8,6 +8,8 @@ import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
 import com.intellij.driver.sdk.ui.components.common.ideFrame
+import com.intellij.driver.sdk.ui.components.common.popups.searchEverywherePopup
+import com.intellij.driver.sdk.ui.ui
 import com.intellij.driver.sdk.ui.components.elements.JTableUiComponent
 import com.intellij.driver.sdk.ui.components.elements.JTreeUiComponent
 import com.intellij.driver.sdk.waitFor
@@ -111,14 +113,126 @@ class ReplSmokeUiTest {
     private fun ReplSession.historyText() =
         getHistory().joinToString("\n") { "[${it.getStatus()}] ${it.getCode()} ${it.getOutput()} ${it.getResult() ?: ""} ${it.getException() ?: ""}" }
 
-    private fun withRider(name: String, test: Driver.() -> Unit) {
+    /**
+     * The window was open when the IDE closed, so the next start restores it visible (workspace window_info
+     * visible="true") and creates its content while the project is still opening.
+     */
+    @Test
+    fun `window restored visible at startup shows toolbar, input and variables`() {
+        val context = riderContext("restore")
+        context.runRider {
+            openToolWindow("C# REPL")
+            checkReplWindow("repl-first-open")
+        }
+        context.runRider {
+            checkReplWindow("repl-restored")
+            // Hidden and shown again (the stripe button's toggle): still the same content.
+            val window = toolWindow()
+            withContext(OnDispatcher.EDT) { window.hide() }
+            withContext(OnDispatcher.EDT) { window.show() }
+            checkReplWindow("repl-reshown")
+        }
+    }
+
+    /**
+     * The user's path (actionSummary.xml: CSharpRepl.Toolbar, then ActivateC#REPLToolWindow): Find Action "C# REPL",
+     * choose the toolbar group (also called "C# REPL") before the window was ever opened, then open the window.
+     * Choosing the group shows its actions in a popup, and their update() asked for the window's content manager, which
+     * created the content there: a cancelled update left the window empty ("Nothing to show") for the rest of the session.
+     */
+    @Test
+    fun `window opened after choosing the C# REPL group in Find Action`() = withRider("findaction") {
+        invokeAction("GotoAction", now = false)
+        val popup = ui.searchEverywherePopup()
+        withContext(OnDispatcher.EDT) { cast(popup.searchField.component, JTextComponentRef::class).setText("C# REPL") }
+        // The group's row: text "C# REPL" without the tool window's "Activate C# REPL window" tooltip.
+        val group = waitNotNull("C# REPL group listed", timeout = 1.minutes) {
+            popup.resultsList.rawItems.map { it.toString() }.indexOfFirst { "text=C# REPL," in it && "toolTip=null" in it }.takeIf { it >= 0 }
+        }
+        withContext(OnDispatcher.EDT) {
+            cast(popup.resultsList.component, JListRef::class).setSelectedIndex(group)
+            val field = popup.searchField.component
+            cast(field, AwtComponentRef::class).dispatchEvent(new(KeyEventRef::class, field, 401 /* KEY_PRESSED */, System.currentTimeMillis(), 0, 10 /* VK_ENTER */, '\n'))
+        }
+        Thread.sleep(5000) // the group's popup and its actions' updates
+        val created = withContext(OnDispatcher.EDT) { toolWindow().getContentManagerIfCreated()?.getContentCount() }
+        check(created == null) { "action updates created the REPL window's content ($created contents) before it was opened" }
+        withContext(OnDispatcher.EDT) { // the group's popup: left open, it keeps the IDE from exiting
+            utility(JBPopupFactoryRef::class).getInstance().getChildPopups(ideFrame().component).forEach { it.cancel() }
+        }
+        openToolWindow("C# REPL")
+        checkReplWindow("repl-after-find-action")
+    }
+
+    /** Dumps and screenshots the REPL window, then checks what is painted: the toolbar's buttons, the input, the variables table. */
+    private fun Driver.checkReplWindow(name: String) {
+        Thread.sleep(3000) // layout and the toolbar's first update
+        val window = toolWindow()
+        val dump = withContext(OnDispatcher.EDT) {
+            buildString {
+                appendLine("visible=${window.isVisible()} contents=${window.getContentManager().getContentCount()}")
+                dump(window.getComponent(), 0, this)
+            }
+        }
+        Files.createDirectories(screenshots)
+        Files.writeString(screenshots.resolve("$name.txt"), dump)
+        println("$name:\n$dump")
+        shot(name)
+        check(window.getContentManager().getContentCount() == 1) { "$name: no REPL content\n$dump" }
+        val panel = ideFrame().x { byType("com.wollumestudios.csharprepl.ui.ReplPanel") }
+        val input = cast(cast(panel.component, ReplPanel::class).getInput(), com.intellij.driver.sdk.ui.remote.Component::class)
+        check(input.isShowing() && input.width > 0 && input.height > 0) { "$name: input not painted\n$dump" }
+        val buttons = panel.xx { byType("com.intellij.openapi.actionSystem.impl.ActionButton") }.list().filter { it.component.isShowing() && it.component.width > 0 }
+        check(buttons.size >= 3) { "$name: toolbar has ${buttons.size} visible buttons\n$dump" }
+        val table = panel.x { byType("com.intellij.ui.treeStructure.treetable.TreeTable") }.component
+        check(table.isShowing() && table.width > 0) { "$name: variables table not painted\n$dump" }
+    }
+
+    private fun Driver.toolWindow(): ToolWindowRef =
+        utility(ToolWindowManagerRef::class).getInstance(singleProject()).getToolWindow("C# REPL") ?: fail("No C# REPL tool window")
+
+    private fun Driver.dump(c: com.intellij.driver.sdk.ui.remote.Component, depth: Int, out: StringBuilder) {
+        out.append("  ".repeat(depth)).append(c.getClass().getName()).append(" [${c.x},${c.y} ${c.width}x${c.height}]")
+            .append(if (c.isShowing()) " showing" else " NOT showing").append('\n')
+        val container = cast(c, AwtContainer::class)
+        if (depth < 12 && !c.getClass().getName().startsWith("com.intellij.openapi.editor.impl.")) // editors: deep and not ours
+            for (i in 0 until container.getComponentCount()) dump(container.getComponent(i), depth + 1, out)
+    }
+
+    /**
+     * The IDE frame as Swing paints it, rendered in the IDE into an image: unlike a Robot screen capture it works while
+     * the test IDE is behind other windows or on another monitor.
+     */
+    private fun Driver.shot(name: String) {
+        val frame = ideFrame().component
+        Files.createDirectories(screenshots)
+        val file = screenshots.resolve("$name.png").toAbsolutePath().toString()
+        withContext(OnDispatcher.EDT) {
+            val image = new(BufferedImageRef::class, frame.width, frame.height, 1 /* TYPE_INT_RGB */)
+            val g = image.createGraphics()
+            cast(frame, AwtComponentRef::class).paintAll(g)
+            g.dispose()
+            utility(ImageIORef::class).write(image, "png", new(FileRef::class, file))
+        }
+        println("Screenshot $name: $file")
+    }
+
+    private val screenshots: Path = Path.of(System.getProperty("csharprepl.screenshots", "build/screenshots"))
+
+    private fun withRider(name: String, test: Driver.() -> Unit) = riderContext(name).runRider(test)
+
+    private fun riderContext(name: String): IDETestContext {
         val solution = sampleCopy().resolve("SampleSolution.sln")
         val context = Starter.newContext(name, TestCase(rider(), SolutionProject(solution)))
         PluginConfigurator(context).installPluginFromDir(Path.of(System.getProperty("csharprepl.plugin")))
         // Fresh temp copy of the sample each run: without this, Rider asks to trust it (a dialog on the user's screen).
         context.applyVMOptionsPatch { addSystemProperty("idea.trust.all.projects", true) }
+        return context
+    }
+
+    private fun IDETestContext.runRider(test: Driver.() -> Unit) {
         // A cold Rider start (first run, busy machine) alone can take ~10 minutes.
-        context.runIdeWithDriver(runTimeout = 45.minutes).useDriverAndCloseIde {
+        runIdeWithDriver(runTimeout = 45.minutes).useDriverAndCloseIde {
             waitForIndicators(30.minutes)
             test()
         }
@@ -160,6 +274,81 @@ private const val PLUGIN = "com.wollumestudios.csharprepl"
 interface ReplPanel {
     fun getInput(): EditorTextField
 }
+
+@Remote("com.intellij.openapi.wm.ToolWindowManager")
+interface ToolWindowManagerRef {
+    fun getInstance(project: com.intellij.driver.sdk.Project): ToolWindowManagerRef
+    fun getToolWindow(id: String): ToolWindowRef?
+}
+
+@Remote("com.intellij.openapi.wm.ToolWindow")
+interface ToolWindowRef {
+    fun isVisible(): Boolean
+    fun show()
+    fun hide()
+    fun getComponent(): com.intellij.driver.sdk.ui.remote.Component
+    fun getContentManager(): ContentManagerRef
+    fun getContentManagerIfCreated(): ContentManagerRef?
+}
+
+@Remote("com.intellij.ui.content.ContentManager")
+interface ContentManagerRef {
+    fun getContentCount(): Int
+}
+
+@Remote("java.awt.Container")
+interface AwtContainer {
+    fun getComponentCount(): Int
+    fun getComponent(n: Int): com.intellij.driver.sdk.ui.remote.Component
+}
+
+@Remote("java.awt.image.BufferedImage")
+interface BufferedImageRef {
+    fun createGraphics(): GraphicsRef
+}
+
+@Remote("java.awt.Graphics2D")
+interface GraphicsRef {
+    fun dispose()
+}
+
+@Remote("java.awt.Component")
+interface AwtComponentRef {
+    fun paintAll(g: GraphicsRef)
+    fun dispatchEvent(e: KeyEventRef)
+}
+
+@Remote("javax.imageio.ImageIO")
+interface ImageIORef {
+    fun write(image: BufferedImageRef, format: String, output: FileRef): Boolean
+}
+
+@Remote("javax.swing.text.JTextComponent")
+interface JTextComponentRef {
+    fun setText(text: String)
+}
+
+@Remote("com.intellij.openapi.ui.popup.JBPopupFactory")
+interface JBPopupFactoryRef {
+    fun getInstance(): JBPopupFactoryRef
+    fun getChildPopups(parent: com.intellij.driver.sdk.ui.remote.Component): List<JBPopupRef>
+}
+
+@Remote("com.intellij.openapi.ui.popup.JBPopup")
+interface JBPopupRef {
+    fun cancel()
+}
+
+@Remote("javax.swing.JList")
+interface JListRef {
+    fun setSelectedIndex(index: Int)
+}
+
+@Remote("java.awt.event.KeyEvent")
+interface KeyEventRef
+
+@Remote("java.io.File")
+interface FileRef
 
 @Remote("javax.swing.JTree")
 interface JTree {
