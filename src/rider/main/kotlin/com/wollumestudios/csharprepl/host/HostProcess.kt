@@ -13,13 +13,14 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The `dotnet CSharpRepl.Host.dll` child process: one JSON object per line over stdin/stdout (UTF-8).
- * [onExit] is called once, from a background thread, after every pending request was failed. No IntelliJ classes, so it runs in plain unit tests.
+ * [onExit] (exit code, whether kill()/close() was called) is called once, from a background thread, after every pending request was failed. No IntelliJ classes, so it runs in plain unit tests.
  */
-class HostProcess(hostDll: Path, private val onExit: (Int) -> Unit, private val log: (String) -> Unit = {}) : AutoCloseable {
+class HostProcess(hostDll: Path, private val onExit: (code: Int, killed: Boolean) -> Unit, private val log: (String) -> Unit = {}) : AutoCloseable {
     private val gson = Gson()
     private val ids = AtomicInteger()
     private val pending = ConcurrentHashMap<Int, CompletableFuture<JsonObject>>()
     @Volatile private var exited = false
+    @Volatile private var killedByUs = false
     private val process: Process = ProcessBuilder("dotnet", hostDll.toString()).start()
     private val stdin = BufferedWriter(OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8))
 
@@ -28,10 +29,12 @@ class HostProcess(hostDll: Path, private val onExit: (Int) -> Unit, private val 
         val errReader = Thread({ process.errorStream.bufferedReader(StandardCharsets.UTF_8).forEachLine { log("host stderr: $it") } }, "csharprepl-host-stderr").apply { isDaemon = true; start() }
         Thread({
             val code = process.waitFor()
-            reader.join(); errReader.join() // deliver every response that was already written before failing the rest
+            // A grandchild (dotnet build, VBCSCompiler) can inherit the pipes and outlive the host: kill what is left, then bound the wait for EOF.
+            process.descendants().forEach { it.destroyForcibly() }
+            reader.join(2000); errReader.join(2000) // deliver every response already written before failing the rest
             exited = true
             pending.keys.toList().forEach { pending.remove(it)?.completeExceptionally(IllegalStateException("host exited with code $code")) }
-            onExit(code)
+            onExit(code, killedByUs)
         }, "csharprepl-host-exit").apply { isDaemon = true; start() }
     }
 
@@ -51,6 +54,7 @@ class HostProcess(hostDll: Path, private val onExit: (Int) -> Unit, private val 
     }
 
     fun kill() {
+        killedByUs = true
         process.descendants().forEach { it.destroyForcibly() } // a running `dotnet build` must not outlive the host
         process.destroyForcibly()
     }
@@ -60,13 +64,15 @@ class HostProcess(hostDll: Path, private val onExit: (Int) -> Unit, private val 
     private fun readResponses() {
         process.inputStream.bufferedReader(StandardCharsets.UTF_8).forEachLine { line ->
             if (line.isBlank()) return@forEachLine
+            var future: CompletableFuture<JsonObject>? = null
             try {
                 val obj = JsonParser.parseString(line).asJsonObject
-                val future = pending.remove(obj.get("id").asInt) ?: return@forEachLine
+                future = pending.remove(obj.get("id").asInt) ?: return@forEachLine
                 if (obj.get("ok").asBoolean) future.complete(obj)
                 else future.completeExceptionally(RuntimeException(obj.get("error")?.asString ?: "host error"))
             } catch (e: Exception) {
                 log("bad host line: $line ($e)")
+                future?.completeExceptionally(e) // a malformed response must not leave its request hanging
             }
         }
     }

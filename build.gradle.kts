@@ -20,6 +20,7 @@ repositories {
 val unitTestRuntime: Configuration by configurations.creating
 
 val publishHost by tasks.registering(Exec::class) {
+    doFirst { delete(layout.buildDirectory.dir("host")) } // stale files must never ship
     description = "dotnet publish of the REPL host (framework-dependent) into build/host"
     group = "build"
     inputs.files(fileTree("src/host/CSharpRepl.Host") { exclude("bin/**", "obj/**") }).withPropertyName("hostSources")
