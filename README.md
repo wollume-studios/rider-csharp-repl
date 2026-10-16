@@ -48,8 +48,10 @@ To get every local build as an update instead:
 ./gradlew publishLocal [-PlocalRepoDir=<dir>]
 ```
 
-copies the zip to `~/.csharprepl/plugin-repo` with a time-stamped version and prints the repository URL; add it once in
-*Settings › Plugins › ⚙ › Manage Plugin Repositories…*. `./gradlew runIde -PopenSolution=samples/SampleSolution/SampleSolution.sln`
+copies the zip with a time-stamped version to `~/.lamarider/plugin-repo`, the local repository it shares with LamaRider.
+It updates only its own entry in `updatePlugins.xml` and keeps its three newest zips; other plugins' entries and zips
+stay. Add `file:///C:/Users/<you>/.lamarider/plugin-repo/updatePlugins.xml` (the printed URL) once in
+*Settings › Plugins › ⚙ › Manage Plugin Repositories…*; it serves both LamaRider and C# REPL. `./gradlew runIde -PopenSolution=samples/SampleSolution/SampleSolution.sln`
 starts a sandbox Rider with the plugin.
 
 ## Tests

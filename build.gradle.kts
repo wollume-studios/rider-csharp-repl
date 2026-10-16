@@ -1,3 +1,4 @@
+import java.io.StringWriter
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
@@ -135,14 +136,14 @@ dependencies {
     }))
 }
 
-// Local plugin repository: Settings › Plugins › ⚙ › Manage Plugin Repositories… › add the printed updatePlugins.xml URL.
-// ./gradlew publishLocal [-PlocalRepoDir=<dir>]
+// Local plugin repository, shared with LamaRider: Settings › Plugins › ⚙ › Manage Plugin Repositories… › add the printed
+// updatePlugins.xml URL once. ./gradlew publishLocal [-PlocalRepoDir=<dir>]
 val publishLocal by tasks.registering {
     group = "publishing"
-    description = "Publish the plugin zip to a local custom plugin repository (updatePlugins.xml)"
+    description = "Publish the plugin zip to the local plugin repository shared with LamaRider (updatePlugins.xml)"
     dependsOn(tasks.buildPlugin)
     val repoDir = providers.gradleProperty("localRepoDir")
-        .orElse(System.getProperty("user.home") + "/.csharprepl/plugin-repo")
+        .orElse(System.getProperty("user.home") + "/.lamarider/plugin-repo")
     val zip = tasks.buildPlugin.flatMap { it.archiveFile }
     val pluginId = providers.gradleProperty("RiderPluginId").get()
     val pluginVersion = version.toString()
@@ -150,22 +151,30 @@ val publishLocal by tasks.registering {
         val dir = file(repoDir.get()).apply { mkdirs() }
         val target = File(dir, zip.get().asFile.name)
         zip.get().asFile.copyTo(target, overwrite = true)
-        // keep the three newest builds
-        dir.listFiles { f -> f.extension == "zip" }!!.sortedByDescending { it.lastModified() }.drop(3).forEach { it.delete() }
+        // keep our three newest builds; other plugins' zips are theirs
+        dir.listFiles { f -> f.name.startsWith("rider-csharp-repl-") && f.extension == "zip" }!!
+            .sortedByDescending { it.lastModified() }.drop(3).forEach { it.delete() }
+        // Merge: every other plugin's entry stays as it is, ours is replaced.
         val xml = File(dir, "updatePlugins.xml")
-        xml.writeText(
-            """
-            |<?xml version="1.0" encoding="UTF-8"?>
-            |<plugins>
-            |  <plugin id="$pluginId" url="${target.toPath().toUri()}" version="$pluginVersion">
+        val others = if (!xml.exists()) emptyList() else {
+            val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(xml)
+            val plugins = doc.documentElement.childNodes
+            val serializer = javax.xml.transform.TransformerFactory.newInstance().newTransformer().apply {
+                setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION, "yes")
+            }
+            (0 until plugins.length).map { plugins.item(it) }
+                .filterIsInstance<org.w3c.dom.Element>()
+                .filter { it.tagName != "plugin" || it.getAttribute("id") != pluginId }
+                .map { e -> StringWriter().also { serializer.transform(javax.xml.transform.dom.DOMSource(e), javax.xml.transform.stream.StreamResult(it)) }.toString() }
+        }
+        val ours = """
+            |<plugin id="$pluginId" url="${target.toPath().toUri()}" version="$pluginVersion">
             |    <idea-version since-build="263"/>
             |    <name>C# REPL</name>
             |    <vendor>Wollume Studios</vendor>
             |    <description>C# REPL tool window for Rider (replacement for C# Interactive).</description>
-            |  </plugin>
-            |</plugins>
-            |""".trimMargin()
-        )
+            |  </plugin>""".trimMargin()
+        xml.writeText("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plugins>\n" + (others + ours).joinToString("") { "  $it\n" } + "</plugins>\n")
         println("C# REPL $pluginVersion published. Repository URL: ${xml.toPath().toUri()}")
     }
 }
