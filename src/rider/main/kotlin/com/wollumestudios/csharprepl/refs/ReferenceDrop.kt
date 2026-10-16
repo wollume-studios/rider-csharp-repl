@@ -111,6 +111,9 @@ object RiderProjectModel {
     /** The solution's `.csproj` files. */
     fun solutionProjects(project: Project): List<File> = guarded(emptyList()) { Impl.solutionProjects(project) }
 
+    /** False once loading the model failed: then [solutionProjects] is empty because nothing is known, not because there are none. */
+    val available get() = !failed
+
     private inline fun <T> guarded(fallback: T, block: () -> T): T {
         if (failed) return fallback
         return try {

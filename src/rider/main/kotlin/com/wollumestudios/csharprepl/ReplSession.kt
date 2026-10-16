@@ -14,7 +14,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.wollumestudios.csharprepl.host.AddReferenceResponse
 import com.wollumestudios.csharprepl.host.AnalyzeResponse
+import com.wollumestudios.csharprepl.host.DumpResponse
 import com.wollumestudios.csharprepl.host.ExpandResponse
+import com.wollumestudios.csharprepl.host.ExportResponse
 import com.wollumestudios.csharprepl.host.HostLocator
 import com.wollumestudios.csharprepl.host.HostProcess
 import com.wollumestudios.csharprepl.host.ReferenceInfo
@@ -198,6 +200,18 @@ class ReplSession(private val project: Project) : Disposable {
 
     fun expand(handle: Int): CompletableFuture<List<Var>> =
         request("expand", mapOf("handle" to handle)).thenApply { gson.fromJson(it, ExpandResponse::class.java).children }
+
+    /** The session as a compiling file-based app (the host's `export`); completes off the EDT. [filePath]: where it will be saved. */
+    fun export(filePath: String, excludeThrown: Boolean): CompletableFuture<ExportResponse> {
+        start()
+        return request("export", mapOf("filePath" to filePath, "excludeThrown" to excludeThrown)).thenApply { gson.fromJson(it, ExportResponse::class.java) }
+    }
+
+    /** The current variables as `var` lines (the host's `dump`); completes off the EDT. */
+    fun dump(filePath: String): CompletableFuture<DumpResponse> {
+        start()
+        return request("dump", mapOf("filePath" to filePath)).thenApply { gson.fromJson(it, DumpResponse::class.java) }
+    }
 
     /** Kills a run that doesn't finish: a fresh host, references kept, variables lost. */
     fun stop() {

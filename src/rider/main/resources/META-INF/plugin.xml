@@ -16,6 +16,8 @@
         <applicationConfigurable parentId="tools" id="com.wollumestudios.csharprepl.settings" displayName="C# REPL"
                                  instance="com.wollumestudios.csharprepl.settings.ReplConfigurable"/>
         <notificationGroup id="CSharpRepl" displayType="BALLOON"/>
+        <!-- Editors of single-file apps (.cs outside the solution's projects, or with #: directives): drop a project to insert #:project. -->
+        <editorFactoryListener implementation="com.wollumestudios.csharprepl.singlefile.SingleFileDropInstaller"/>
     </extensions>
 
     <projectListeners>
@@ -45,9 +47,19 @@
         <action id="CSharpRepl.Ignore" class="com.wollumestudios.csharprepl.actions.IgnoreChangeAction"/>
         <action id="CSharpRepl.IgnoreForSession" class="com.wollumestudios.csharprepl.actions.IgnoreForSessionAction"/>
         <action id="CSharpRepl.IgnoreChangesForever" class="com.wollumestudios.csharprepl.actions.IgnoreChangesForeverAction"/>
+        <action id="CSharpRepl.NewSingleFileApp" class="com.wollumestudios.csharprepl.singlefile.NewSingleFileAppAction">
+            <add-to-group group-id="NewGroup" anchor="last"/>
+        </action>
+        <action id="CSharpRepl.ExcludeThrown" class="com.wollumestudios.csharprepl.singlefile.ExcludeThrownAction"/>
+        <action id="CSharpRepl.DumpVariables" class="com.wollumestudios.csharprepl.singlefile.DumpVariablesAction"/>
+        <group id="CSharpRepl.ExportToSingleFile" class="com.wollumestudios.csharprepl.singlefile.ExportToSingleFileGroup" popup="true"
+               text="To Single-File App" description="Save the session as a single-file app" icon="AllIcons.ToolbarDecorator.Export">
+            <reference ref="CSharpRepl.ExcludeThrown"/>
+        </group>
         <group id="CSharpRepl.Gear" text="Options" description="References and settings" popup="true" icon="AllIcons.General.Settings">
             <group id="CSharpRepl.References" class="com.wollumestudios.csharprepl.actions.ReferencesGroup"/>
             <reference ref="CSharpRepl.AddReference"/>
+            <reference ref="CSharpRepl.NewSingleFileApp"/>
             <separator/>
             <reference ref="CSharpRepl.IgnoreChangesForever"/>
             <reference ref="CSharpRepl.Settings"/>
@@ -57,6 +69,9 @@
             <reference ref="CSharpRepl.Stop"/>
             <reference ref="CSharpRepl.ToggleAutoRun"/>
             <reference ref="CSharpRepl.Reset"/>
+            <separator/>
+            <reference ref="CSharpRepl.ExportToSingleFile"/>
+            <reference ref="CSharpRepl.DumpVariables"/>
             <separator/>
             <reference ref="CSharpRepl.AddReference"/>
             <reference ref="CSharpRepl.Gear"/>
