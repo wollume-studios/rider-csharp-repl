@@ -25,13 +25,33 @@ public static partial class ReferenceBuilder
 
     private static string RefsRoot => Path.Combine(DataRoot, "refs");
 
+    private const string InUse = ".inuse";
+
+    // Every snapshot this host creates holds an exclusive lock file for the process lifetime, so another host's cleanup leaves it alone.
+    private static readonly List<FileStream> Locks = new();
+
+    private static string NewSnapshot(string name)
+    {
+        var snapshot = Path.Combine(RefsRoot, $"{name}-{DateTime.Now:yyyyMMddHHmmssfff}");
+        Directory.CreateDirectory(snapshot);
+        var marker = new FileStream(Path.Combine(snapshot, InUse), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        lock (Locks) Locks.Add(marker);
+        return snapshot;
+    }
+
+    /// <summary>Deletes snapshots older than a day unless another host still holds their `.inuse` lock.</summary>
     public static void CleanOldSnapshots()
     {
         if (!Directory.Exists(RefsRoot)) return;
         foreach (var dir in Directory.EnumerateDirectories(RefsRoot))
         {
-            try { if (Directory.GetLastWriteTimeUtc(dir) < DateTime.UtcNow.AddDays(-1)) Directory.Delete(dir, true); }
-            catch (IOException) { } // in use by another host instance: leave it
+            try
+            {
+                if (Directory.GetLastWriteTimeUtc(dir) >= DateTime.UtcNow.AddDays(-1)) continue;
+                using (new FileStream(Path.Combine(dir, InUse), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) { } // throws while held
+                Directory.Delete(dir, true);
+            }
+            catch (IOException) { } // held by a live host, or a file inside is in use: leave it
             catch (UnauthorizedAccessException) { }
         }
     }
@@ -71,13 +91,27 @@ public static partial class ReferenceBuilder
             [], snapshot);
     }
 
-    /// <summary>A prebuilt DLL is referenced in place (not copied); its directory is probed for dependencies.</summary>
+    /// <summary>A prebuilt DLL is copied with its sibling DLLs/PDBs into a snapshot, so the original (usually a bin folder) is never locked.</summary>
     public static BuiltReference Dll(string path)
     {
         path = Path.GetFullPath(path);
         if (!File.Exists(path)) throw new ReferenceException($"File not found: {path}");
         if (!IsManaged(path)) throw new ReferenceException($"Not a managed assembly: {path}");
-        return new BuiltReference([path], [], Path.GetDirectoryName(path)!);
+
+        var snapshot = NewSnapshot(Path.GetFileNameWithoutExtension(path));
+        try
+        {
+            var dir = Path.GetDirectoryName(path)!;
+            // ponytail: top-level files only (no satellite/runtimes subfolders); a huge folder is copied whole
+            foreach (var f in Directory.EnumerateFiles(dir, "*.dll").Concat(Directory.EnumerateFiles(dir, "*.pdb")))
+                File.Copy(f, Path.Combine(snapshot, Path.GetFileName(f)), true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            TryDelete(snapshot);
+            throw new ReferenceException($"Could not copy {path} to a snapshot: {e.Message}");
+        }
+        return new BuiltReference([Path.Combine(snapshot, Path.GetFileName(path))], [], snapshot);
     }
 
     public static bool IsManaged(string file)
@@ -98,7 +132,7 @@ public static partial class ReferenceBuilder
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var best = candidates.Select(t => (Tfm: t, Rank: Rank(t))).Where(t => t.Rank != null).OrderByDescending(t => t.Rank).FirstOrDefault().Tfm;
         return best ?? throw new ReferenceException(
-            $"Unsupported target framework '{string.Join(", ", candidates)}'. Supported: net5.0 up to net{Environment.Version.Major}.0 and netstandard2.x; " +
+            $"Unsupported target framework '{string.Join(", ", candidates)}'. Supported: net8.0 up to net{Environment.Version.Major}.0 and netstandard2.x; " +
             ".NET Framework, Windows-specific (-windows) and newer-than-installed targets are rejected.");
     }
 
@@ -108,13 +142,12 @@ public static partial class ReferenceBuilder
         var m = Plain().Match(tfm); // no platform suffix, so -windows etc. never match; net48 has no dot
         if (!m.Success) return null;
         var major = int.Parse(m.Groups[1].Value);
-        return major >= 5 && major <= Environment.Version.Major ? major * 100 + int.Parse(m.Groups[2].Value) : null;
+        return major >= 8 && major <= Environment.Version.Major ? major * 100 + int.Parse(m.Groups[2].Value) : null;
     }
 
     private static async Task<(string Snapshot, JsonElement Items)> Build(string csproj, string name, string? tfm)
     {
-        var snapshot = Path.Combine(RefsRoot, $"{name}-{DateTime.Now:yyyyMMddHHmmssfff}");
-        Directory.CreateDirectory(snapshot);
+        var snapshot = NewSnapshot(name);
         var args = new List<string>
         {
             "build", csproj, "-c", "Debug", "-t:Build", // -getProperty alone only evaluates; -t:Build makes it build as well
@@ -203,6 +236,8 @@ public static partial class ReferenceBuilder
 
     private static void TryDelete(string dir)
     {
+        lock (Locks)
+            foreach (var l in Locks.Where(l => l.Name == Path.Combine(dir, InUse)).ToArray()) { l.Dispose(); Locks.Remove(l); }
         try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 

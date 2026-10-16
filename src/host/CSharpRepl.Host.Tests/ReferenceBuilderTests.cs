@@ -73,6 +73,14 @@ public class ReferenceBuilderTests
     }
 
     [Fact]
+    public async Task OldTfm_Rejected()
+    {
+        var e = await Assert.ThrowsAsync<ReferenceException>(() => ReferenceBuilder.BuildProject(Fixture("Net6Lib")));
+        Assert.Contains("net6.0", e.Message);
+        Assert.Contains("net8.0", e.Message);
+    }
+
+    [Fact]
     public async Task BuildFailure_ReportsTail()
     {
         var e = await Assert.ThrowsAsync<ReferenceException>(() => ReferenceBuilder.BuildProject(Fixture("Broken")));
@@ -91,6 +99,27 @@ public class ReferenceBuilderTests
         var r = await engine.RunAsync("SampleLib.Greeter.Hi(\"d\")");
         Assert.Equal("\"Hi d\"", r.Result);
         Assert.Contains(new ReferenceInfo("dll", copy, null), engine.References);
+    }
+
+    [Fact]
+    public async Task Dll_DoesNotLockOriginal()
+    {
+        var built = await ReferenceBuilder.BuildProject(Fixture("SampleLib"));
+        var bin = Directory.CreateTempSubdirectory().FullName;
+        foreach (var f in built.Assemblies.Where(a => Path.GetFileName(a) is "SampleLib.dll" or "Humanizer.dll"))
+            File.Copy(f, Path.Combine(bin, Path.GetFileName(f)));
+
+        var engine = await EngineWith("dll", Path.Combine(bin, "SampleLib.dll"));
+        Assert.Equal("\"Hi q\"", (await engine.RunAsync("SampleLib.Greeter.Hi(\"q\")")).Result);
+        Assert.Equal(Path.Combine(bin, "SampleLib.dll"), Assert.Single(engine.References).PathOrName);
+        var copy = ReferenceBuilder.Dll(Path.Combine(bin, "SampleLib.dll")); // a second snapshot, only to inspect what gets copied
+        Assert.NotEqual(bin, copy.SnapshotDir);
+        Assert.True(File.Exists(Path.Combine(copy.SnapshotDir, "Humanizer.dll")));
+
+        // both the referenced DLL and its loaded sibling must be deletable/overwritable while the session uses them
+        File.WriteAllText(Path.Combine(bin, "SampleLib.dll"), "overwritten");
+        File.Delete(Path.Combine(bin, "Humanizer.dll"));
+        Directory.Delete(bin, true);
     }
 
     [Fact]
@@ -137,5 +166,23 @@ public class ReferenceBuilderTests
         ReferenceBuilder.CleanOldSnapshots();
         Assert.False(Directory.Exists(old));
         Assert.True(Directory.Exists(fresh));
+    }
+
+    [Fact]
+    public void CleanOldSnapshots_KeepsSnapshotHeldByAnotherHost()
+    {
+        var refs = Path.Combine(ReferenceBuilder.DataRoot, "refs");
+        var (held, free) = (Path.Combine(refs, "held-test"), Path.Combine(refs, "free-test"));
+        Directory.CreateDirectory(held);
+        Directory.CreateDirectory(free);
+        using (new FileStream(Path.Combine(held, ".inuse"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) // what a live host holds
+        {
+            Directory.SetLastWriteTimeUtc(held, DateTime.UtcNow.AddDays(-2));
+            Directory.SetLastWriteTimeUtc(free, DateTime.UtcNow.AddDays(-2));
+            ReferenceBuilder.CleanOldSnapshots();
+            Assert.True(Directory.Exists(held));
+            Assert.False(Directory.Exists(free));
+        }
+        Directory.Delete(held, true);
     }
 }
