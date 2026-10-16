@@ -1,0 +1,8 @@
+[versions]
+kotlin = "2.4.21" # must read the Kotlin metadata of the targeted Rider's platform jars
+
+[libraries]
+kotlinStdLib = { group = "org.jetbrains.kotlin", name = "kotlin-stdlib", version.ref = "kotlin" }
+
+[plugins]
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
