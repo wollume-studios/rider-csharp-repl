@@ -8,4 +8,29 @@
     ]]></description>
 
     <depends>com.intellij.modules.rider</depends>
+
+    <!-- ReplSettings (application) and ReplSession (project) are light services (@Service). -->
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="C# REPL" anchor="bottom" icon="/icons/repl.svg"
+                    factoryClass="com.wollumestudios.csharprepl.ui.ReplToolWindowFactory"/>
+        <applicationConfigurable parentId="tools" id="com.wollumestudios.csharprepl.settings" displayName="C# REPL"
+                                 instance="com.wollumestudios.csharprepl.settings.ReplConfigurable"/>
+    </extensions>
+
+    <actions>
+        <action id="CSharpRepl.Run" class="com.wollumestudios.csharprepl.actions.RunAction"/>
+        <action id="CSharpRepl.Stop" class="com.wollumestudios.csharprepl.actions.StopAction"/>
+        <action id="CSharpRepl.ToggleAutoRun" class="com.wollumestudios.csharprepl.actions.ToggleAutoRunAction"/>
+        <action id="CSharpRepl.Reset" class="com.wollumestudios.csharprepl.actions.ResetAction"/>
+        <action id="CSharpRepl.ClearPending" class="com.wollumestudios.csharprepl.actions.ClearPendingAction"/>
+        <action id="CSharpRepl.Settings" class="com.wollumestudios.csharprepl.actions.SettingsAction"/>
+        <group id="CSharpRepl.Toolbar" text="C# REPL">
+            <reference ref="CSharpRepl.Run"/>
+            <reference ref="CSharpRepl.Stop"/>
+            <reference ref="CSharpRepl.ToggleAutoRun"/>
+            <reference ref="CSharpRepl.Reset"/>
+            <separator/>
+            <reference ref="CSharpRepl.Settings"/>
+        </group>
+    </actions>
 </idea-plugin>
