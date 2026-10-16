@@ -79,7 +79,8 @@ public static class Program
                     writer.Ok(request.Id, new RestoreScriptResponse(code, restoreBad));
                     break;
                 case "export":
-                    writer.Ok(request.Id, new ExportResponse(engine.Export(request.FilePath ?? throw new ArgumentException("filePath required"), request.ExcludeThrown ?? false)));
+                    var (exported, warnings) = engine.Export(request.FilePath ?? throw new ArgumentException("filePath required"), request.ExcludeThrown ?? false);
+                    writer.Ok(request.Id, new ExportResponse(exported, warnings));
                     break;
                 default:
                     writer.Error(request.Id, "unknown command: " + request.Cmd);

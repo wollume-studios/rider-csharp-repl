@@ -175,6 +175,7 @@ public class ProtocolLoopTests
         var text = export.GetProperty("text").GetString()!;
         Assert.Contains("var x = 1;", text);
         Assert.DoesNotContain("boom", text);
+        Assert.Equal(JsonValueKind.Array, export.GetProperty("warnings").ValueKind);
         await s.Finish();
     }
 }

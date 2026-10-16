@@ -19,7 +19,7 @@ public sealed record DumpResponse(string Text, string[] NotReproducible);
 
 public sealed record RestoreScriptResponse(string Code, string[] NotReproducible);
 
-public sealed record ExportResponse(string Text);
+public sealed record ExportResponse(string Text, string[] Warnings);
 
 /// <summary>One JSON object per line; writes are serialized so concurrent handlers never interleave.</summary>
 public sealed class ProtocolWriter(Stream output)

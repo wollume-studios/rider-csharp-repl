@@ -217,7 +217,7 @@ public sealed partial class ReplEngine
         return (lines, bad.ToArray());
     }
 
-    public string Export(string filePath, bool excludeThrown) =>
+    public (string Text, string[] Warnings) Export(string filePath, bool excludeThrown) =>
         SessionExporter.Export(Submissions, excludeThrown, Directives.For(References, filePath), _options);
 
     public IReadOnlyList<VarInfo> Expand(int handle)
