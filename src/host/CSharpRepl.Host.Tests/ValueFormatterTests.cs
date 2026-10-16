@@ -120,6 +120,46 @@ public class ValueFormatterTests
     }
 
     [Fact]
+    public async Task Children_OfUnfinishedTask_DoNotReadResult()
+    {
+        var task = new TaskCompletionSource<int>().Task;
+        var children = await Task.Run(() => Children(task).ToList()).WaitAsync(TimeSpan.FromSeconds(10));
+        var result = children.Single(c => c.Name == "Result");
+        Assert.Equal("not completed", Display(result.Value));
+        Assert.False(HasChildren(result.Value));
+    }
+
+    [Fact]
+    public void Children_OfCompletedTask_ShowResult()
+    {
+        Assert.Equal("5", Display(Children(Task.FromResult(5)).Single(c => c.Name == "Result").Value));
+    }
+
+    [Fact]
+    public void Children_OfUncreatedLazy_DoNotRunFactory()
+    {
+        var ran = false;
+        var lazy = new Lazy<int>(() => { ran = true; return 1; });
+        Assert.Equal("not created", Display(Children(lazy).Single(c => c.Name == "Value").Value));
+        Assert.False(ran);
+        _ = lazy.Value;
+        Assert.Equal("1", Display(Children(lazy).Single(c => c.Name == "Value").Value));
+    }
+
+    private sealed class ThrowingCount : IReadOnlyCollection<int>
+    {
+        public int Count => throw new InvalidOperationException("boom");
+        public IEnumerator<int> GetEnumerator() => throw new NotSupportedException();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    [Fact]
+    public void Display_UnwrapsTargetInvocationException()
+    {
+        Assert.Equal("{InvalidOperationException: boom}", Display(new ThrowingCount()));
+    }
+
+    [Fact]
     public void HasChildren_OnlyForCompositeValues()
     {
         Assert.False(HasChildren(null));

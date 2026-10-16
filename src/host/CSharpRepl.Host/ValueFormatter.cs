@@ -73,7 +73,11 @@ public static class ValueFormatter
         return owner == typeof(object) || owner == typeof(ValueType) ? TypeName(t) : v.ToString() ?? "";
     }
 
-    private static string Failure(Exception e) => $"{{{e.GetType().Name}: {e.Message}}}";
+    private static string Failure(Exception e)
+    {
+        if (e is TargetInvocationException { InnerException: { } inner }) e = inner;
+        return $"{{{e.GetType().Name}: {e.Message}}}";
+    }
 
     private static string Escape(string s, char quote)
     {
@@ -137,6 +141,18 @@ public static class ValueFormatter
         {
             foreach (var m in Members(t))
             {
+                // Reading these would block forever (Task.Result) or run user code (Lazy.Value); show a note instead.
+                if (m.Name == "Result" && v is Task { IsCompleted: false })
+                {
+                    result.Add((m.Name, new Note("not completed"), typeof(Note)));
+                    continue;
+                }
+                if (m.Name == "Value" && t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Lazy<>)
+                    && !(bool)t.GetProperty("IsValueCreated")!.GetValue(v)!)
+                {
+                    result.Add((m.Name, new Note("not created"), typeof(Note)));
+                    continue;
+                }
                 var (type, get) = m is FieldInfo f ? (f.FieldType, (Func<object?>)(() => f.GetValue(v))) : (((PropertyInfo)m).PropertyType, () => ((PropertyInfo)m).GetValue(v));
                 object? value;
                 try { value = get(); }
