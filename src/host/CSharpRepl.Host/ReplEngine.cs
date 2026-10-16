@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
 using Microsoft.CodeAnalysis.Scripting;
 
@@ -144,15 +146,71 @@ public sealed partial class ReplEngine
         }
     }
 
-    public IReadOnlyList<VarInfo> GetVariables()
-    {
-        var vars = (_state?.Variables ?? ImmutableArray<ScriptVariable>.Empty)
+    private IEnumerable<(string Name, Type Type, object? Value)> Declared() =>
+        (_state?.Variables ?? ImmutableArray<ScriptVariable>.Empty)
             .GroupBy(v => v.Name)
             .Select(g => g.Last())
-            .Select(v => Describe(v.Name, v.Type, v.Value))
-            .ToList();
+            .Select(v => (v.Name, v.Type, (object?)v.Value));
+
+    public IReadOnlyList<VarInfo> GetVariables()
+    {
+        var vars = Declared().Select(v => Describe(v.Name, v.Type, v.Value)).ToList();
         if (_lastException is { } ex) vars.Add(Describe("$exception", ex.GetType(), ex));
         return vars;
+    }
+
+    /// <summary>A file-based app that declares the session's variables (`#!`, directives, then `var x = ...;`). Values that can't be written as code become comments. Reads live values: call it on the sequential worker.</summary>
+    public (string Text, string[] NotReproducible) Dump(string filePath)
+    {
+        var (lines, bad) = VariableLines(replTypes: false);
+        var directives = Directives.For(References, filePath);
+        return ("#!/usr/bin/env dotnet\n" + (directives.Length > 0 ? directives + "\n" : "") + "\n" + string.Concat(lines.Select(l => l + "\n")), bad);
+    }
+
+    /// <summary>Script for a fresh session: the usings and type declarations of the successful submissions, then the `var` lines.</summary>
+    public (string Code, string[] NotReproducible) RestoreScript()
+    {
+        var usings = new List<string>();
+        var types = new List<(string Key, string Text)>();
+        // A submission that threw still declared its types; only compile errors leave nothing behind.
+        foreach (var submission in Submissions.Where(s => s.Status != SubmissionStatus.CompileError))
+        {
+            var root = CSharpSyntaxTree.ParseText(submission.Code, new CSharpParseOptions(kind: SourceCodeKind.Script)).GetCompilationUnitRoot();
+            foreach (var u in root.Usings) if (!usings.Contains(u.ToString())) usings.Add(u.ToString());
+            foreach (var m in root.Members)
+            {
+                var key = m switch
+                {
+                    TypeDeclarationSyntax t => $"{t.Identifier.Text}`{t.Arity}",
+                    EnumDeclarationSyntax e => e.Identifier.Text + "`0",
+                    DelegateDeclarationSyntax d => $"{d.Identifier.Text}`{d.Arity}",
+                    _ => null,
+                };
+                if (key == null) continue;
+                types.RemoveAll(t => t.Key == key); // a redeclared type replaces the earlier one
+                types.Add((key, m.ToFullString().Trim()));
+            }
+        }
+        var (lines, bad) = VariableLines(replTypes: true);
+        return (string.Join("\n", usings.Concat(types.Select(t => t.Text)).Concat(lines)), bad);
+    }
+
+    private (List<string> Lines, string[] NotReproducible) VariableLines(bool replTypes)
+    {
+        var lines = new List<string>();
+        var bad = new List<string>();
+        foreach (var (name, type, value) in Declared())
+        {
+            if (ValueToCode.TryToCode(value, type, out var code, replTypes)) lines.Add($"var {name} = {code};");
+            else
+            {
+                bad.Add(name);
+                // The display can span lines (a custom ToString); anything after a line break would stop being a comment.
+                var shown = Regex.Replace(ValueFormatter.Display(value), "[\r\n\u0085\u2028\u2029]+", " ");
+                lines.Add($"// {name}: {ValueFormatter.TypeName(type)} = {shown} (not reproducible)");
+            }
+        }
+        return (lines, bad.ToArray());
     }
 
     public IReadOnlyList<VarInfo> Expand(int handle)

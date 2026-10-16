@@ -20,7 +20,7 @@ public static class Program
 
     public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
 
-    /// <summary>Reads requests until EOF. `run`, `variables`, `expand` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
+    /// <summary>Reads requests until EOF. `run`, `variables`, `expand`, `dump`, `restoreScript` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
     public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine)
     {
         var writer = new ProtocolWriter(output);
@@ -39,7 +39,7 @@ public static class Program
             catch (JsonException e) { writer.Error(0, "invalid request: " + e.Message); continue; }
             if (request == null) { writer.Error(0, "invalid request"); continue; }
 
-            if (request.Cmd is "run" or "variables" or "expand" or "addReference") await runs.Writer.WriteAsync(request);
+            if (request.Cmd is "run" or "variables" or "expand" or "addReference" or "dump" or "restoreScript") await runs.Writer.WriteAsync(request);
             else await Handle(request, writer, engine);
         }
 
@@ -69,6 +69,14 @@ public static class Program
                 case "addReference":
                     var built = await engine.AddReferenceAsync(request.Kind ?? "", request.Path, request.Name, request.Version);
                     writer.Ok(request.Id, new AddReferenceResponse(built.Assemblies, built.SourceDirs));
+                    break;
+                case "dump":
+                    var (text, dumpBad) = engine.Dump(request.FilePath ?? throw new ArgumentException("filePath required"));
+                    writer.Ok(request.Id, new DumpResponse(text, dumpBad));
+                    break;
+                case "restoreScript":
+                    var (code, restoreBad) = engine.RestoreScript();
+                    writer.Ok(request.Id, new RestoreScriptResponse(code, restoreBad));
                     break;
                 default:
                     writer.Error(request.Id, "unknown command: " + request.Cmd);
