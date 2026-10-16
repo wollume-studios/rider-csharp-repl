@@ -106,12 +106,13 @@ public static class SessionExporter
 
         var distinct = warnings.Distinct().ToArray();
         var header = "#!/usr/bin/env dotnet\n" + (directives.Length > 0 ? directives.TrimEnd('\n') + "\n" : "")
-            + string.Concat(distinct.Select(w => "// WARNING: " + w + "\n")) + "\n";
+            + string.Concat(distinct.Select(w => "// WARNING: " + OneLine(w) + "\n")) + "\n";
         var body = new[] { string.Join("\n", usings), string.Join("\n", statements), string.Join("\n\n", types) }.Where(b => b.Length > 0);
         return (header + string.Join("\n\n", body) + "\n", distinct);
     }
 
-    private static string OneLine(string s) => s.Replace("\r", " ").Replace("\n", " ");
+    // Any C# line terminator would end a `//` comment.
+    private static string OneLine(string s) => System.Text.RegularExpressions.Regex.Replace(s, "[\r\n\x85\x2028\x2029]", " ");
 
     private static IEnumerable<(string Name, ISymbol Symbol)> Declarations(CompilationUnitSyntax root, SemanticModel model)
     {

@@ -15,7 +15,11 @@ public enum SubmissionStatus { Ok, Threw, CompileError }
 
 public sealed record Submission(string Code, SubmissionStatus Status);
 
-public sealed record RunResult(SubmissionStatus Status, string Output, string? Result, string[] Diagnostics, string? Exception);
+public sealed record RunResult(SubmissionStatus Status, string Output, string? Result, string[] Diagnostics, string? Exception)
+{
+    /// <summary>References the run's `#r "nuget: ..."` lines added to the session (the frontend re-adds them on later hosts).</summary>
+    public ReferenceInfo[] AddedReferences { get; init; } = [];
+}
 
 public sealed record VarInfo(string Name, string Type, string Value, int? Handle);
 
@@ -54,6 +58,9 @@ public sealed partial class ReplEngine
 
     [GeneratedRegex("""^[ \t]*#r[ \t]+"nuget:[ \t]*([^,"]+?)[ \t]*,[ \t]*([^"]+?)[ \t]*"[ \t]*\r?$""", RegexOptions.Multiline)]
     private static partial Regex NuGetDirective();
+
+    /// <summary>Console output kept per run; the rest is only counted (a runaway loop must not flood Rider).</summary>
+    public const int OutputCap = 100_000;
 
     private readonly SemaphoreSlim _gate = new(1, 1); // Console redirection is process-wide: one run at a time
     private readonly List<Submission> _submissions = new();
@@ -97,20 +104,22 @@ public sealed partial class ReplEngine
         await _gate.WaitAsync();
         lock (_handles) _handles.Clear();
         var (oldOut, oldErr) = (Console.Out, Console.Error);
-        var output = new StringWriter();
+        var output = new CappedWriter(OutputCap);
         var sync = TextWriter.Synchronized(output); // Out and Error share one lock so interleaved writes stay whole
         Console.SetOut(sync);
         Console.SetError(sync);
         try
         {
             // #r "nuget: Name, Version" is ours, not Roslyn's: build the package, then hand Roslyn the code without the line (kept blank so diagnostics keep their line numbers).
+            var added = new List<ReferenceInfo>();
             foreach (Match m in NuGetDirective().Matches(code))
             {
                 try { await AddReferenceAsync("nuget", null, m.Groups[1].Value, m.Groups[2].Value); }
-                catch (ReferenceException e) { return new RunResult(SubmissionStatus.CompileError, "", null, [e.Message], null); }
+                catch (ReferenceException e) { return new RunResult(SubmissionStatus.CompileError, "", null, [e.Message], null) { AddedReferences = [.. added] }; }
+                added.Add(new ReferenceInfo("nuget", m.Groups[1].Value, m.Groups[2].Value));
             }
             code = NuGetDirective().Replace(code, "");
-            if (string.IsNullOrWhiteSpace(code)) return new RunResult(SubmissionStatus.Ok, "", null, [], null);
+            if (string.IsNullOrWhiteSpace(code)) return new RunResult(SubmissionStatus.Ok, "", null, [], null) { AddedReferences = [.. added] };
 
             ScriptState<object> next;
             try
@@ -124,7 +133,7 @@ public sealed partial class ReplEngine
                 _lastException = null;
                 Record(code, SubmissionStatus.CompileError);
                 return new RunResult(SubmissionStatus.CompileError, output.ToString(), null,
-                    e.Diagnostics.Select(d => d.ToString()).ToArray(), null);
+                    e.Diagnostics.Select(d => d.ToString()).ToArray(), null) { AddedReferences = [.. added] };
             }
 
             _state = next;
@@ -132,13 +141,13 @@ public sealed partial class ReplEngine
             if (next.Exception is { } ex)
             {
                 Record(code, SubmissionStatus.Threw);
-                return new RunResult(SubmissionStatus.Threw, output.ToString(), null, [], $"{ex.GetType().Name}: {ex.Message}");
+                return new RunResult(SubmissionStatus.Threw, output.ToString(), null, [], $"{ex.GetType().Name}: {ex.Message}") { AddedReferences = [.. added] };
             }
 
             Record(code, SubmissionStatus.Ok);
             // ponytail: a trailing expression that evaluates to null is indistinguishable from no expression
             var result = next.ReturnValue is { } v ? ValueFormatter.Display(v) : null;
-            return new RunResult(SubmissionStatus.Ok, output.ToString(), result, [], null);
+            return new RunResult(SubmissionStatus.Ok, output.ToString(), result, [], null) { AddedReferences = [.. added] };
         }
         finally
         {
@@ -169,7 +178,7 @@ public sealed partial class ReplEngine
         return ("#!/usr/bin/env dotnet\n" + (directives.Length > 0 ? directives + "\n" : "") + "\n" + string.Concat(lines.Select(l => l + "\n")), bad);
     }
 
-    /// <summary>Script for a fresh session: the usings and type declarations of the successful submissions, then the `var` lines.</summary>
+    /// <summary>Script for a fresh session: the usings, type declarations and top-level methods of the successful submissions, then the `var` lines.</summary>
     public (string Code, string[] NotReproducible) RestoreScript()
     {
         var usings = new List<string>();
@@ -186,10 +195,12 @@ public sealed partial class ReplEngine
                     TypeDeclarationSyntax t => $"{t.Identifier.Text}`{t.Arity}",
                     EnumDeclarationSyntax e => e.Identifier.Text + "`0",
                     DelegateDeclarationSyntax d => $"{d.Identifier.Text}`{d.Arity}",
+                    // An overload is a separate method; a redeclared signature replaces the earlier one.
+                    MethodDeclarationSyntax md => $"{md.Identifier.Text}`{md.Arity}({string.Join(",", md.ParameterList.Parameters.Select(p => p.Type?.ToString()))})",
                     _ => null,
                 };
                 if (key == null) continue;
-                types.RemoveAll(t => t.Key == key); // a redeclared type replaces the earlier one
+                types.RemoveAll(t => t.Key == key); // a redeclared type or method replaces the earlier one
                 types.Add((key, m.ToFullString().Trim()));
             }
         }
@@ -240,4 +251,28 @@ public sealed partial class ReplEngine
     {
         lock (_submissions) _submissions.Add(new Submission(code, status));
     }
+}
+
+/// <summary>Keeps the first <c>cap</c> characters written and only counts the rest.</summary>
+public sealed class CappedWriter(int cap) : TextWriter
+{
+    private readonly System.Text.StringBuilder _kept = new();
+    private long _dropped;
+
+    public override System.Text.Encoding Encoding => System.Text.Encoding.Unicode;
+
+    public override void Write(char value) => Write([value]);
+
+    public override void Write(char[] buffer, int index, int count) => Write(buffer.AsSpan(index, count));
+
+    public override void Write(string? value) => Write(value.AsSpan());
+
+    public override void Write(ReadOnlySpan<char> buffer)
+    {
+        var take = Math.Min(buffer.Length, cap - _kept.Length);
+        _kept.Append(buffer[..take]);
+        _dropped += buffer.Length - take;
+    }
+
+    public override string ToString() => _dropped == 0 ? _kept.ToString() : $"{_kept}… ({_dropped} more characters)";
 }

@@ -140,6 +140,7 @@ public class ReferenceBuilderTests
         Assert.Equal("\"some text\"", r.Result);
         Assert.DoesNotContain("#r", engine.Submissions[^1].Code);
         Assert.Contains(new ReferenceInfo("nuget", "Humanizer.Core", "2.14.1"), engine.References);
+        Assert.Equal([new ReferenceInfo("nuget", "Humanizer.Core", "2.14.1")], r.AddedReferences);
     }
 
     [Fact]

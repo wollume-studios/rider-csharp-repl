@@ -102,6 +102,25 @@ public class DumpRestoreTests
     }
 
     [Fact]
+    public async Task RestoreScript_IncludesTopLevelMethods()
+    {
+        var engine = await Run(new ReplEngine(),
+            "int Twice(int x) => x;",
+            "int Twice(int x) => x * 2;", // redeclared: the later one wins
+            "string Twice(string s) => s + s;", // an overload stays
+            "var y = Twice(2);");
+        var (code, _) = engine.RestoreScript();
+        Assert.Equal(1, code.Split("int Twice(int x)").Length - 1);
+        Assert.True(code.IndexOf("string Twice", StringComparison.Ordinal) < code.IndexOf("var y =", StringComparison.Ordinal));
+
+        var fresh = new ReplEngine();
+        Assert.Equal(SubmissionStatus.Ok, (await fresh.RunAsync(code)).Status);
+        Assert.Equal("10", (await fresh.RunAsync("Twice(5)")).Result);
+        Assert.Equal("\"abab\"", (await fresh.RunAsync("Twice(\"ab\")")).Result);
+        Assert.Equal("4", (await fresh.RunAsync("y")).Result);
+    }
+
+    [Fact]
     public async Task Protocol_DumpAndRestoreScript()
     {
         var engine = await Run(new ReplEngine(), "var x = 1;");

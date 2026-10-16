@@ -258,6 +258,13 @@ public class SessionExporterTests
     }
 
     [Fact]
+    public void MultiLineTypelessExpression_WarningStaysOneCommentLine()
+    {
+        var text = Export("var x = 1;", "(null\n)"); // compiles: the warning in the header must not leak code onto its own line
+        Assert.Contains("// WARNING: result not printed, the expression has no type: (null )", text);
+    }
+
+    [Fact]
     public void TopLevelReturn_BecomesPlainReturnWithWarning_ButNotInsideFunctions()
     {
         var text = Export("var x = 1;", "if (x > 5) return x;", "Func<int, int> f = v => { return v; };", "int G() { return 2; }", "G()");

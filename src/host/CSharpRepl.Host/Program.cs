@@ -15,13 +15,14 @@ public static class Program
         Console.SetIn(TextReader.Null); // user Console.ReadLine() must not consume protocol input
         try { ReferenceBuilder.CleanOldSnapshots(); } catch (Exception) { } // housekeeping must never stop the host
         var input = CreateInputReader(Console.OpenStandardInput());
-        await RunLoop(input, protocolOut, new ReplEngine());
+        // stdin EOF means Rider is gone: exit now, even with a submission still running (it must not outlive the IDE).
+        await RunLoop(input, protocolOut, new ReplEngine(), onEof: () => Environment.Exit(0));
     }
 
     public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
 
-    /// <summary>Reads requests until EOF. `run`, `variables`, `expand`, `dump`, `restoreScript`, `export` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
-    public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine)
+    /// <summary>Reads requests until EOF, then calls <paramref name="onEof"/> (if any) before waiting for the queued work. `run`, `variables`, `expand`, `dump`, `restoreScript`, `export` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
+    public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine, Action? onEof = null)
     {
         var writer = new ProtocolWriter(output);
         var runs = Channel.CreateUnbounded<Request>();
@@ -44,6 +45,7 @@ public static class Program
         }
 
         runs.Writer.Complete();
+        onEof?.Invoke();
         await worker;
     }
 

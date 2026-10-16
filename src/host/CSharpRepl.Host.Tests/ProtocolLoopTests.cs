@@ -150,6 +150,33 @@ public class ProtocolLoopTests
     }
 
     [Fact]
+    public async Task Loop_Run_ReportsAddedReferences()
+    {
+        using var s = new Session();
+        await s.Send(new { id = 1, cmd = "run", code = "1" });
+        var none = await s.Receive();
+        Assert.Equal(JsonValueKind.Array, none.GetProperty("addedReferences").ValueKind);
+        Assert.Equal(0, none.GetProperty("addedReferences").GetArrayLength());
+
+        await s.Send(new { id = 2, cmd = "run", code = "#r \"nuget: Humanizer.Core, 2.14.1\"\n1" });
+        var added = Assert.Single((await s.Receive()).GetProperty("addedReferences").EnumerateArray());
+        Assert.Equal("nuget", added.GetProperty("kind").GetString());
+        Assert.Equal("Humanizer.Core", added.GetProperty("pathOrName").GetString());
+        Assert.Equal("2.14.1", added.GetProperty("version").GetString());
+        await s.Finish();
+    }
+
+    [Fact]
+    public async Task Loop_Eof_CallsOnEofWithoutWaitingForTheRunningSubmission()
+    {
+        var eof = new TaskCompletionSource();
+        var loop = Program.RunLoop(new StringReader("{\"id\":1,\"cmd\":\"run\",\"code\":\"System.Threading.Thread.Sleep(10000);\"}\n"),
+            new MemoryStream(), new ReplEngine(), onEof: () => eof.SetResult());
+        await eof.Task.WaitAsync(TimeSpan.FromSeconds(5)); // the host's Main exits here; the run is still sleeping
+        Assert.False(loop.IsCompleted);
+    }
+
+    [Fact]
     public async Task Loop_UnknownCommand_IsError()
     {
         using var s = new Session();

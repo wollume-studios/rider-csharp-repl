@@ -138,6 +138,19 @@ public class ReplEngineTests
     }
 
     [Fact]
+    public async Task ConsoleOutput_IsCappedAndCountsTheRest()
+    {
+        var result = await new ReplEngine().RunAsync("for (var i = 0; i < 150_000; i++) Console.Write('x');");
+        Assert.Equal(new string('x', ReplEngine.OutputCap) + "… (50000 more characters)", result.Output);
+    }
+
+    [Fact]
+    public async Task Run_WithoutNuGetDirective_AddsNoReferences()
+    {
+        Assert.Empty((await new ReplEngine().RunAsync("1")).AddedReferences);
+    }
+
+    [Fact]
     public async Task Result_IsDisplayed()
     {
         var result = await new ReplEngine().RunAsync("DateTime.Parse(\"2026-10-16\").ToString(\"dd.MM\")");
