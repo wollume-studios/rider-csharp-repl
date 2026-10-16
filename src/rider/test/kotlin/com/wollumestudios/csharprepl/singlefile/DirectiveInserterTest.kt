@@ -3,6 +3,7 @@ package com.wollumestudios.csharprepl.singlefile
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -64,5 +65,21 @@ class DirectiveInserterTest {
         assertFalse(DirectiveInserter.inSolutionProject(outside, listOf(proj)))
         assertFalse(DirectiveInserter.inSolutionProject(strayCs, listOf(proj))) // nearest csproj is not in the solution
         assertTrue(DirectiveInserter.inSolutionProject(strayCs, listOf(proj, stray)))
+    }
+
+    @Test
+    fun `project directive falls back to an absolute path across drives`(@TempDir dir: File) {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val app = File(dir, "app.cs").also { it.writeText("") }
+        val otherDrive = if (dir.toPath().root.toString().startsWith("Z", true)) "Y" else "Z"
+        assertEquals("#:project $otherDrive:/x/Lib.csproj", DirectiveInserter.projectDirective(app, File("$otherDrive:\\x\\Lib.csproj")))
+    }
+
+    @Test
+    fun `nearest project is found above the file, or null`(@TempDir dir: File) {
+        val proj = File(dir, "A/A.csproj").also { it.parentFile.mkdirs(); it.writeText("") }
+        val deep = File(dir, "A/b/c/x.cs").also { it.parentFile.mkdirs(); it.writeText("") }
+        assertEquals(proj.canonicalFile, DirectiveInserter.nearestProject(deep)?.canonicalFile)
+        assertEquals(null, DirectiveInserter.nearestProject(File(dir, "none/y.cs").also { it.parentFile.mkdirs() }))
     }
 }

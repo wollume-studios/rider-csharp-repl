@@ -6,13 +6,19 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.SplitButtonAction
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.ui.SimpleListCellRenderer
+import com.wollumestudios.csharprepl.refs.RiderProjectModel
+import java.nio.file.Files
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.fileEditor.FileEditorManager
-import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.DumbAwareToggleAction
 import com.intellij.openapi.project.Project
@@ -34,11 +40,22 @@ object SingleFile {
 
     private val STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm")
 
-    /** Save dialog in `<solution dir>/scratch/` (created on save) named `<prefix>-<yyyyMMdd-HHmm>.cs`; null when cancelled. */
+    /**
+     * `<solution dir>/scratch/`, unless a file there would sit under a `.csproj` (the project would compile it and break its
+     * build): then `<user.home>/CSharpRepl/scratch/`. Created here so the dialog opens in it; null when it can't be created.
+     */
+    fun scratchDir(project: Project): Path? {
+        val probe = project.basePath?.let { File(it, "scratch/x.cs") }
+        val inProject = probe != null && if (RiderProjectModel.available) DirectiveInserter.inSolutionProject(probe, RiderProjectModel.solutionProjects(project))
+            else DirectiveInserter.nearestProject(probe) != null
+        val dir = if (probe == null || inProject) Path.of(System.getProperty("user.home"), "CSharpRepl", "scratch") else probe.parentFile.toPath()
+        return try { Files.createDirectories(dir) } catch (e: IOException) { null }
+    }
+
+    /** Save dialog in [scratchDir], named `<prefix>-<yyyyMMdd-HHmm>.cs`; null when cancelled. */
     fun chooseTarget(project: Project, prefix: String, title: String): File? {
         val dialog = FileChooserFactory.getInstance().createSaveFileDialog(FileSaverDescriptor(title, "Save as a single-file app", "cs"), project)
-        val base = project.basePath?.let { Path.of(it, "scratch") }
-        return dialog.save(base, "$prefix-${LocalDateTime.now().format(STAMP)}.cs")?.file
+        return dialog.save(scratchDir(project), "$prefix-${LocalDateTime.now().format(STAMP)}.cs")?.file
     }
 
     /** Writes [text] to [file] through the VFS (creating its folder), then opens it. Call on the EDT. */
@@ -52,8 +69,11 @@ object SingleFile {
         FileEditorManager.getInstance(project).openFile(vf, true)
     }
 
-    /** Runs [done] on the EDT when the host answered; failures (host down, IO) become a notification. */
-    fun <T> whenAnswered(project: Project, what: String, answer: CompletableFuture<T>, done: (T) -> Unit) {
+    /**
+     * Runs [done] on the EDT, in the modality [modality] captured at click time, when the host answered. A failed or
+     * empty answer (host down, no text) and IO errors become a notification.
+     */
+    fun <T> whenAnswered(project: Project, what: String, modality: ModalityState, answer: CompletableFuture<T>, done: (T) -> Unit) {
         answer.whenComplete { r, error ->
             ApplicationManager.getApplication().invokeLater({
                 try {
@@ -61,8 +81,15 @@ object SingleFile {
                 } catch (e: IOException) {
                     ReplSession.notify(project, "$what failed: ${e.message}", NotificationType.ERROR)
                 }
-            }, ModalityState.defaultModalityState(), project.disposed)
+            }, modality, project.disposed)
         }
+    }
+
+    /** Gson leaves a field the host did not send null. */
+    fun missingText(project: Project, what: String, text: String?): Boolean {
+        if (text != null) return false
+        ReplSession.notify(project, "$what failed: the host returned no text", NotificationType.ERROR)
+        return true
     }
 }
 
@@ -97,31 +124,28 @@ class NewSingleFileAppAction : DumbAwareAction("C# Single-File App", "Create a .
     }
 }
 
-/**
- * To single-file app ▾: the button exports with the current toggle; the arrow opens the dropdown with the toggle.
- * A popup group that is also performed as an action (isPerformGroup): ActionButton shows the arrow and runs [actionPerformed] on click.
- */
-class ExportToSingleFileGroup : DefaultActionGroup(), DumbAware {
-    init {
-        isPopup = true
-    }
-
+/** To single-file app: save the session with the current "Exclude commands that threw" setting. Main button of [ExportSplitButtonAction]. */
+class ExportToSingleFileAction : DumbAwareAction("To Single-File App", "Save the session as a single-file app", AllIcons.ToolbarDecorator.Export) {
     override fun getActionUpdateThread() = ActionUpdateThread.BGT
     override fun update(e: AnActionEvent) {
-        e.presentation.isPerformGroup = true
         e.presentation.isEnabled = e.project != null
     }
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
+        val modality = ModalityState.current()
         val file = SingleFile.chooseTarget(project, "session", "Save Session as Single-File App") ?: return
         val exclude = ReplSettings.state.exportExcludeThrown
-        SingleFile.whenAnswered(project, "Export", ReplSession.getInstance(project).export(file.path, exclude)) { r ->
+        SingleFile.whenAnswered(project, "Export", modality, ReplSession.getInstance(project).export(file.path, exclude)) { r ->
+            if (SingleFile.missingText(project, "Export", r.text)) return@whenAnswered
             SingleFile.saveAndOpen(project, file, r.text)
             if (!r.warnings.isNullOrEmpty()) ReplSession.notify(project, "Exported with warnings: " + r.warnings.joinToString("; "), NotificationType.WARNING)
         }
     }
 }
+
+/** Toolbar "To single-file app ▾": the button runs [ExportToSingleFileAction]; the arrow opens the dropdown with the exclude toggle. */
+class ExportSplitButtonAction : SplitButtonAction(DefaultActionGroup(ExportToSingleFileAction(), ExcludeThrownAction()))
 
 class ExcludeThrownAction : DumbAwareToggleAction("Exclude Commands That Threw", "Leave the commands that threw an exception out of the exported file", null) {
     override fun getActionUpdateThread() = ActionUpdateThread.BGT
@@ -141,10 +165,48 @@ class DumpVariablesAction : DumbAwareAction("Dump Variables", "Save the variable
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
+        val modality = ModalityState.current()
         val file = SingleFile.chooseTarget(project, "variables", "Save Variables as Single-File App") ?: return
-        SingleFile.whenAnswered(project, "Dump", ReplSession.getInstance(project).dump(file.path)) { r ->
+        SingleFile.whenAnswered(project, "Dump", modality, ReplSession.getInstance(project).dump(file.path)) { r ->
+            if (SingleFile.missingText(project, "Dump", r.text)) return@whenAnswered
             SingleFile.saveAndOpen(project, file, r.text)
             if (!r.notReproducible.isNullOrEmpty()) ReplSession.notify(project, "Not reproducible: " + r.notReproducible.joinToString(", "), NotificationType.WARNING)
         }
+    }
+}
+
+/**
+ * Editor menu / Generate: inserts a `#:project` directive for a solution project (picked from a list; a `.csproj` file
+ * chooser when Rider's project model has none to offer). Only on single-file-app `.cs` editors.
+ */
+class AddProjectDirectiveAction : DumbAwareAction("Add Project Reference Directive…", "Insert #:project for a solution project at the top of this single-file app", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        val project = e.project
+        val editor = e.getData(CommonDataKeys.EDITOR)
+        val file = e.getData(CommonDataKeys.VIRTUAL_FILE)
+        e.presentation.isEnabledAndVisible = project != null && editor != null && file != null && SingleFileApps.isSingleFileApp(project, file, editor.document.text)
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        val file = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
+        fun insert(csproj: File) {
+            if (!SingleFileApps.addProjectDirectives(project, editor.document, file, listOf(csproj)))
+                ReplSession.notify(project, "${file.name} is read-only", NotificationType.WARNING)
+        }
+        val projects = RiderProjectModel.solutionProjects(project).distinct().sortedBy { it.nameWithoutExtension.lowercase() }
+        if (projects.isEmpty()) {
+            FileChooser.chooseFile(FileChooserDescriptorFactory.createSingleFileDescriptor("csproj").withTitle("Project to Reference"), project, null)?.let { insert(File(it.path)) }
+            return
+        }
+        JBPopupFactory.getInstance().createPopupChooserBuilder(projects)
+            .setTitle("Add Project Reference Directive")
+            .setRenderer(SimpleListCellRenderer.create("") { it.nameWithoutExtension })
+            .setNamerForFiltering { it.nameWithoutExtension }
+            .setItemChosenCallback { insert(it) }
+            .createPopup()
+            .showInBestPositionFor(editor)
     }
 }

@@ -1,71 +1,81 @@
 package com.wollumestudios.csharprepl.singlefile
 
 import com.intellij.ide.dnd.FileCopyPasteUtil
-import com.intellij.openapi.application.ApplicationManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.editor.CustomFileDropHandler
+import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.editor.EditorDropHandler
-import com.intellij.openapi.editor.EditorKind
-import com.intellij.openapi.editor.event.EditorFactoryEvent
-import com.intellij.openapi.editor.event.EditorFactoryListener
-import com.intellij.openapi.editor.impl.EditorImpl
 import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.fileEditor.impl.EditorWindow
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.ReadonlyStatusHandler
+import com.intellij.openapi.vfs.VirtualFile
+import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.refs.ReferenceDrop
 import com.wollumestudios.csharprepl.refs.RiderProjectModel
-import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.Transferable
 import java.io.File
 
-/** Gives the editors of single-file apps (`.cs` outside the solution's projects, or with `#:` directives) a drop handler for projects. */
-class SingleFileDropInstaller : EditorFactoryListener {
-    override fun editorCreated(event: EditorFactoryEvent) {
-        val editor = event.editor as? EditorImpl ?: return
-        val project = editor.project ?: return
-        if (editor.editorKind != EditorKind.MAIN_EDITOR) return
-        val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
-        if (!file.extension.equals("cs", true) || !file.isInLocalFileSystem) return
-        // Later: the file editor installs its own drop handler while it is built, and ours must wrap that one.
-        ApplicationManager.getApplication().invokeLater {
-            if (editor.isDisposed) return@invokeLater
-            val projects = RiderProjectModel.solutionProjects(project)
-            // Model not loaded: unknown, so "in a project" unless the file says otherwise with #: directives.
-            val inProject = !RiderProjectModel.available || DirectiveInserter.inSolutionProject(File(file.path), projects)
-            val previous = previousHandler(editor) ?: return@invokeLater // unreadable: keep the default drop
-            if (DirectiveInserter.isSingleFileApp(editor.document.text, inProject))
-                editor.setDropHandler(SingleFileDrop(project, editor, previous))
-        }
+/** What makes a `.cs` editor a single-file app, and how project directives get into it (drop and the editor action share this). */
+object SingleFileApps {
+    /** A local `.cs` file with `#:` directives, or outside the solution's projects. Rider's model not loaded: only `#:` files qualify. */
+    fun isSingleFileApp(project: Project, file: VirtualFile, text: String): Boolean {
+        if (!file.extension.equals("cs", true) || !file.isInLocalFileSystem) return false
+        if (DirectiveInserter.hasDirectives(text)) return true
+        val projects = RiderProjectModel.solutionProjects(project)
+        val inProject = !RiderProjectModel.available || DirectiveInserter.inSolutionProject(File(file.path), projects)
+        return DirectiveInserter.isSingleFileApp(text, inProject)
     }
 
-    // ponytail: EditorImpl.getDropHandler is package-private (FileEditorDropHandler is internal), so the current handler is read reflectively; if that breaks, no handler is installed.
-    private fun previousHandler(editor: EditorImpl): EditorDropHandler? =
-        runCatching { EditorImpl::class.java.getDeclaredField("myDropHandler").apply { isAccessible = true }.get(editor) as? EditorDropHandler }.getOrNull()
-
-}
-
-/** Projects dropped onto the editor become `#:project` directives; any other drop goes to [previous]. */
-private class SingleFileDrop(private val project: Project, private val editor: Editor, private val previous: EditorDropHandler) : EditorDropHandler {
-    override fun canHandleDrop(flavors: Array<out DataFlavor>) = previous.canHandleDrop(flavors) || FileCopyPasteUtil.isFileListFlavorAvailable(flavors)
-
-    override fun handleDrop(t: Transferable, project: Project?, editorWindow: EditorWindow?) = handle(t) { previous.handleDrop(t, project, editorWindow) }
-
-    override fun handleDrop(t: Transferable, project: Project?, editorWindow: EditorWindow?, dropAction: Int) =
-        handle(t) { previous.handleDrop(t, project, editorWindow, dropAction) }
-
-    private fun handle(t: Transferable, fallback: () -> Unit) {
-        val projects = FileCopyPasteUtil.getFileList(t).orEmpty().mapNotNull { ReferenceDrop.referenceFor(it)?.takeIf { r -> r.kind == "project" } }
-        val file = FileDocumentManager.getInstance().getFile(editor.document)
-        if (projects.isEmpty() || file == null) return fallback()
-        val directives = projects.map { DirectiveInserter.projectDirective(File(file.path), File(it.pathOrName)) }
+    /** Inserts a `#:project` line per project in [document] of [file] (one undo step). False when the file is read-only. */
+    fun addProjectDirectives(project: Project, document: Document, file: VirtualFile, csprojs: List<File>): Boolean {
+        if (!ReadonlyStatusHandler.ensureFilesWritable(project, file)) return false
+        val directives = csprojs.map { DirectiveInserter.projectDirective(File(file.path), it) }
         WriteCommandAction.runWriteCommandAction(project, "Add Project Reference", null, {
-            val doc = editor.document
             directives.forEach { d ->
-                val old = doc.text
+                val old = document.text
                 val new = DirectiveInserter.insert(old, d)
                 val at = old.commonPrefixWith(new).length
-                if (new != old) doc.insertString(at, new.substring(at, at + new.length - old.length))
+                if (new != old) document.insertString(at, new.substring(at, at + new.length - old.length))
             }
         })
+        return true
+    }
+}
+
+/**
+ * Registered as `customFileDropHandler`: Rider's FileDropManager asks these first (on the EDT) and only opens the dropped
+ * files when none handles the drop. Projects dropped onto a single-file app's editor become `#:project` directives;
+ * every other drop and every other editor is left alone (canHandle is false).
+ */
+class SingleFileProjectDrop : CustomFileDropHandler() {
+    override fun canHandle(t: Transferable, editor: Editor?): Boolean = try {
+        val project = editor?.project
+        val file = editor?.let { FileDocumentManager.getInstance().getFile(it.document) }
+        editor != null && project != null && file != null && projectFiles(t).isNotEmpty() && SingleFileApps.isSingleFileApp(project, file, editor.document.text)
+    } catch (e: Throwable) {
+        LOG.warn("C# REPL: single-file drop check failed", e)
+        false
+    }
+
+    override fun handleDrop(t: Transferable, editor: Editor?, project: Project): Boolean = try {
+        val file = editor?.let { FileDocumentManager.getInstance().getFile(it.document) }
+        if (file == null) false
+        else {
+            if (!SingleFileApps.addProjectDirectives(project, editor.document, file, projectFiles(t)))
+                ReplSession.notify(project, "${file.name} is read-only", NotificationType.WARNING)
+            true // canHandle said yes: don't let the drop open the .csproj as well
+        }
+    } catch (e: Throwable) {
+        LOG.warn("C# REPL: single-file drop failed", e)
+        false
+    }
+
+    private fun projectFiles(t: Transferable) =
+        FileCopyPasteUtil.getFileList(t).orEmpty().mapNotNull { ReferenceDrop.referenceFor(it) }.filter { it.kind == "project" }.map { File(it.pathOrName) }
+
+    private companion object {
+        val LOG = logger<SingleFileProjectDrop>()
     }
 }

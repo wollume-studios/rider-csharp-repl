@@ -21,24 +21,25 @@ object DirectiveInserter {
 
     fun hasDirectives(text: String) = text.lineSequence().any { it.startsWith("#:") }
 
-    /**
-     * SDK-style projects compile every `.cs` below their folder: a file belongs to the solution when the nearest folder
-     * above it that holds a `.csproj` holds one of [projectFiles].
-     */
-    fun inSolutionProject(file: File, projectFiles: Collection<File>): Boolean {
-        val projects = projectFiles.map { ProjectChangeWatcher.canonical(it.path) }.toSet()
+    /** The `.csproj` of the nearest folder above [file] that holds one (SDK-style projects compile every `.cs` below their folder), or null. */
+    fun nearestProject(file: File): File? {
         var dir: File? = File(ProjectChangeWatcher.canonical(file.path)).parentFile
         while (dir != null) {
-            val csprojs = dir.listFiles { f -> f.extension.equals("csproj", true) }.orEmpty()
-            if (csprojs.isNotEmpty()) return csprojs.any { ProjectChangeWatcher.canonical(it.path) in projects }
+            dir.listFiles { f -> f.extension.equals("csproj", true) }?.minByOrNull { it.name }?.let { return it }
             dir = dir.parentFile
         }
-        return false
+        return null
+    }
+
+    /** A file belongs to the solution when its [nearestProject] is one of [projectFiles]. */
+    fun inSolutionProject(file: File, projectFiles: Collection<File>): Boolean {
+        val nearest = nearestProject(file) ?: return false
+        return ProjectChangeWatcher.canonical(nearest.path) in projectFiles.map { ProjectChangeWatcher.canonical(it.path) }
     }
 
     /** `#:project` line for [csproj] as seen from the folder of [file]: relative, forward slashes (absolute across drives). */
     fun projectDirective(file: File, csproj: File): String {
-        val target = Path.of(csproj.path)
+        val target = Path.of(ProjectChangeWatcher.canonical(csproj.path))
         val path = try {
             Path.of(ProjectChangeWatcher.canonical(file.path)).parent.relativize(target)
         } catch (e: IllegalArgumentException) { // other drive
