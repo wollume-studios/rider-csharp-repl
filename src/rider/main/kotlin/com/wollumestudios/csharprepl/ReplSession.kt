@@ -23,6 +23,8 @@ import com.wollumestudios.csharprepl.host.RunResponse
 import com.wollumestudios.csharprepl.host.Var
 import com.wollumestudios.csharprepl.host.VariablesResponse
 import com.wollumestudios.csharprepl.refs.ProjectChangeListener
+import com.wollumestudios.csharprepl.refs.ProjectChangeWatcher
+import com.wollumestudios.csharprepl.refs.WatchedProject
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import java.io.File
 import java.io.IOException
@@ -30,8 +32,9 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * One history item. [status] is the host's "ok" / "threw" / "compileError", or "error" (the host failed the run),
- * "stopped" (killed by Stop), "note" (a session message in [output], no code).
+ * One history item. [status] is the host's "ok" / "threw" / "compileError", or "running" (sent, no answer yet: the
+ * entry is replaced in place when the answer comes), "error" (the host failed the run), "stopped" (killed by Stop or a
+ * restart), "note" (a session message in [output], no code).
  */
 data class HistoryEntry(
     val code: String,
@@ -47,9 +50,6 @@ data class HistoryEntry(
 }
 
 enum class RestartMode { Empty, Replay, Restore }
-
-/** A referenced project as the change watcher sees it: its directory and ProjectReference closure, and when it was (re)built. */
-data class WatchedProject(val name: String, val dirs: List<String>, val since: Long)
 
 /** Short name for messages: the project name, the DLL file name, or "Package version". */
 val ReferenceInfo.displayName: String
@@ -68,8 +68,8 @@ class ReplSession(private val project: Project) : Disposable {
     private var generation = 0
     /** The last generation whose host answered a request: a host that dies before that is not restarted in a loop. */
     @Volatile private var answeredGeneration = -1
-    /** Code of runs sent to the current host and not answered yet, in order (the host runs them one by one). */
-    private val inFlight = ArrayDeque<String>()
+    /** The "running" history entries of runs sent to the current host and not answered yet (by identity). */
+    private val inFlight = mutableListOf<HistoryEntry>()
 
     private val entries = mutableListOf<HistoryEntry>()
     val history: List<HistoryEntry> get() = entries
@@ -81,11 +81,10 @@ class ReplSession(private val project: Project) : Disposable {
         private set
     /** Re-added in this order on every host start. Change it through [addReference] / [removeReference]. */
     val references = mutableListOf<ReferenceInfo>()
-    private val projectDirs = mutableMapOf<ReferenceInfo, WatchedProject>()
-    /** Snapshot of the referenced projects for the change watcher, which reads it off the EDT. */
+    /** The referenced projects for the change watcher, which reads it off the EDT (immutable list, replaced on change). */
     @Volatile var watched: List<WatchedProject> = emptyList()
         private set
-    /** The referenced project the banner reports as changed, or null (no banner). */
+    /** Name of the referenced project the banner reports as changed, or null (no banner). */
     var changedProject: String? = null
         private set
     /** "Ignore for this session": no banner until the next [reset]. */
@@ -157,28 +156,42 @@ class ReplSession(private val project: Project) : Disposable {
         changed()
     }
 
-    /** Runs [code] as is, appends it to the history, then refreshes the variables. Clears pending. */
+    /**
+     * Runs [code] as is: it enters the history right away as a "running" entry (nothing runs unseen), which is replaced
+     * in place by the answer; then the variables are refreshed. Clears pending.
+     */
     fun submit(code: String) {
         if (code.isBlank()) return
         start()
         setPending("")
         val gen = generation
         if (host == null) { append(HistoryEntry(code, "error", exception = "No host process")); return }
-        inFlight.addLast(code)
-        changed()
+        val running = HistoryEntry(code, "running")
+        inFlight += running
+        append(running)
         request("run", mapOf("code" to code)).whenComplete { json, error ->
             onEdt {
-                if (gen != generation) return@onEdt // stopped or restarted: already reported
-                inFlight.removeFirstOrNull()
-                if (json != null) {
-                    val r = gson.fromJson(json, RunResponse::class.java)
-                    append(HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception))
-                } else {
-                    append(HistoryEntry(code, "error", exception = (error?.cause ?: error)?.message ?: "run failed"))
-                }
+                if (gen != generation) return@onEdt // stopped or restarted: the entry was already marked
+                inFlight.removeIf { it === running }
+                val done = if (json != null) gson.fromJson(json, RunResponse::class.java).let { r -> HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception) }
+                else HistoryEntry(code, "error", exception = (error?.cause ?: error)?.message ?: "run failed")
+                replace(running, done)
                 refreshVariables()
             }
         }
+    }
+
+    /** Marks the unanswered runs of the host being dropped (their answers will never be shown). */
+    private fun endInFlight(entry: (HistoryEntry) -> HistoryEntry) {
+        inFlight.forEach { replace(it, entry(it)) }
+        inFlight.clear()
+    }
+
+    private fun replace(old: HistoryEntry, new: HistoryEntry) {
+        val i = entries.indexOfFirst { it === old }
+        if (i < 0) return // cleared by Reset
+        entries[i] = new
+        changed()
     }
 
     fun clearPending() = setPending("")
@@ -188,8 +201,7 @@ class ReplSession(private val project: Project) : Disposable {
 
     /** Kills a run that doesn't finish: a fresh host, references kept, variables lost. */
     fun stop() {
-        inFlight.forEach { entries += HistoryEntry(it, "stopped") }
-        restart(RestartMode.Empty)
+        restart(RestartMode.Empty) // marks the running entries "stopped"
         append(HistoryEntry.note("Stopped — session restarted, variables lost"))
     }
 
@@ -207,8 +219,6 @@ class ReplSession(private val project: Project) : Disposable {
      * [RestartMode.Restore] runs the old host's restore script (type declarations and variables as code). Both run visibly.
      */
     fun restart(mode: RestartMode) {
-        changedProject = null // the new host rebuilds the references
-        changed()
         when (mode) {
             RestartMode.Empty -> replaceHost()
             RestartMode.Replay -> {
@@ -219,14 +229,15 @@ class ReplSession(private val project: Project) : Disposable {
             }
             RestartMode.Restore -> {
                 val gen = generation
+                append(HistoryEntry.note("Restoring variables…"))
                 request("restoreScript", emptyMap()).whenComplete { json, error ->
                     onEdt {
                         if (gen != generation) return@onEdt
                         replaceHost()
                         if (json == null) { append(HistoryEntry.note("Session restarted; variables could not be restored: ${(error?.cause ?: error)?.message}")); return@onEdt }
                         val r = gson.fromJson(json, RestoreScriptResponse::class.java)
-                        append(HistoryEntry.note("Session restarted, restoring variables"))
-                        submit(r.code)
+                        append(HistoryEntry.note("Session restarted, running the restore script"))
+                        submit(r.code) // shown in the history as it runs
                         if (!r.notReproducible.isNullOrEmpty()) notify(project, "Not restored: ${r.notReproducible.joinToString()}", NotificationType.WARNING)
                     }
                 }
@@ -259,16 +270,20 @@ class ReplSession(private val project: Project) : Disposable {
     /** Drops [ref] and restarts the host without it (variables are lost; the caller asked the user). */
     fun removeReference(ref: ReferenceInfo) {
         if (!references.remove(ref)) return
-        projectDirs.remove(ref)
-        watched = projectDirs.values.toList()
+        watched = watched.filter { it.path != ref.pathOrName }
         restart(RestartMode.Empty)
         append(HistoryEntry.note("Removed ${ref.displayName}; session restarted, variables lost"))
     }
 
-    /** From the change watcher: shows the banner for [name] unless one is up (one per burst) or changes are ignored. */
-    fun projectChanged(name: String) {
-        if (changedProject != null || ignoreUntilReset || ReplSettings.state.ignoreChangesForever || watched.none { it.name == name }) return
-        changedProject = name
+    /**
+     * From the change watcher, with the referenced project file [path]: shows the banner unless one is up (one per burst)
+     * or changes are ignored. Raising it moves the project's `since` to now, so after Ignore only newer builds count.
+     */
+    fun projectChanged(path: String) {
+        val project = watched.firstOrNull { it.path == path } ?: return // removed meanwhile
+        if (changedProject != null || ignoreUntilReset || ReplSettings.state.ignoreChangesForever) return
+        watched = ProjectChangeWatcher.raised(watched, path, System.currentTimeMillis())
+        changedProject = project.name
         changed()
     }
 
@@ -282,8 +297,7 @@ class ReplSession(private val project: Project) : Disposable {
     private fun watch(ref: ReferenceInfo, json: JsonObject) {
         if (ref.kind != "project") return
         val dirs = gson.fromJson(json, AddReferenceResponse::class.java).sourceDirs.orEmpty()
-        projectDirs[ref] = WatchedProject(ref.displayName, dirs, System.currentTimeMillis())
-        watched = projectDirs.values.toList()
+        watched = watched.filter { it.path != ref.pathOrName } + WatchedProject(ref.pathOrName, ref.displayName, dirs, System.currentTimeMillis())
     }
 
     override fun dispose() {
@@ -294,7 +308,8 @@ class ReplSession(private val project: Project) : Disposable {
 
     private fun replaceHost() {
         generation++
-        inFlight.clear()
+        endInFlight { it.copy(status = "stopped") }
+        changedProject = null // the new host rebuilds the references
         host?.kill() // killed = true: onExit stays quiet, the caller reports
         host = null
         variables = emptyList()
@@ -325,9 +340,9 @@ class ReplSession(private val project: Project) : Disposable {
 
     private fun hostExited(gen: Int, code: Int) {
         if (gen != generation) return
+        endInFlight { it.copy(status = "error", exception = "Host exited (code $code)") }
         if (answeredGeneration != gen) { // never came up: restarting would loop
             generation++
-            inFlight.clear()
             host = null
             append(HistoryEntry.note("Host exited (code $code) before it started; it starts again with the next command (details in idea.log)"))
             return

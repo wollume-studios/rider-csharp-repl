@@ -19,19 +19,18 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.wm.ToolWindowManager
-import com.intellij.platform.backend.workspace.WorkspaceModel
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.COLUMNS_MEDIUM
 import com.intellij.ui.dsl.builder.COLUMNS_SHORT
 import com.intellij.ui.dsl.builder.columns
 import com.intellij.ui.dsl.builder.panel
-import com.jetbrains.rider.projectView.workspace.findProjects
-import com.jetbrains.rider.projectView.workspace.getFile
 import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.RestartMode
 import com.wollumestudios.csharprepl.displayName
 import com.wollumestudios.csharprepl.host.ReferenceInfo
 import com.wollumestudios.csharprepl.refs.ReferenceDrop
+import com.wollumestudios.csharprepl.refs.RiderProjectModel
+import java.io.File
 import com.wollumestudios.csharprepl.ui.ReplToolWindowFactory
 import com.wollumestudios.csharprepl.settings.ReplConfigurable
 import com.wollumestudios.csharprepl.settings.ReplSettings
@@ -133,10 +132,9 @@ class AddReferenceAction : DumbAwareAction("Add Reference…", "Reference a solu
         val project = e.project ?: return
         val session = ReplSession.getInstance(project)
         // Rider's frontend project model (workspace model): every project entity of the solution, by its project file.
-        val projects = WorkspaceModel.getInstance(project).findProjects().mapNotNull { it.getFile() }
-            .filter { it.extension.equals("csproj", true) }.distinct().sortedBy { it.nameWithoutExtension.lowercase() }
+        val projects = RiderProjectModel.solutionProjects(project).distinct().sortedBy { it.nameWithoutExtension.lowercase() }
         val group = DefaultActionGroup().apply {
-            projects.forEach { f -> add(DumbAwareAction.create(f.nameWithoutExtension) { session.addReference(ReferenceInfo("project", f.path, null)) }) }
+            projects.forEach { f -> add(DumbAwareAction.create(f.nameWithoutExtension) { session.addReference(ReferenceDrop.projectReference(f)) }) }
             if (projects.isNotEmpty()) addSeparator()
             add(DumbAwareAction.create("DLL…") { chooseDll(project)?.let(session::addReference) })
             add(DumbAwareAction.create("NuGet package…") { askNuGet(project)?.let(session::addReference) })
@@ -148,7 +146,7 @@ class AddReferenceAction : DumbAwareAction("Add Reference…", "Reference a solu
 
     private fun chooseDll(project: Project): ReferenceInfo? =
         FileChooser.chooseFile(FileChooserDescriptorFactory.createSingleFileDescriptor("dll").withTitle("Reference DLL"), project, null)
-            ?.let { ReferenceInfo("dll", it.path, null) }
+            ?.let { ReferenceDrop.dllReference(File(it.path)) }
 
     private fun askNuGet(project: Project): ReferenceInfo? {
         lateinit var name: JBTextField
@@ -179,7 +177,7 @@ class ReferenceInReplAction : DumbAwareAction("Reference in C# REPL", "Build thi
     }
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        ReferenceDrop.projectFiles(e.dataContext).forEach { ReplSession.getInstance(project).addReference(ReferenceInfo("project", it.path, null)) }
+        ReferenceDrop.projectFiles(e.dataContext).forEach { ReplSession.getInstance(project).addReference(ReferenceDrop.projectReference(it)) }
         ToolWindowManager.getInstance(project).getToolWindow(ReplToolWindowFactory.ID)?.show() // "Building …" shows there
     }
 }

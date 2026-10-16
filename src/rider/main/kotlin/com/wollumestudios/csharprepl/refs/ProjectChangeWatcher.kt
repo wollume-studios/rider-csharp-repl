@@ -10,10 +10,16 @@ import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.jetbrains.rd.util.lifetime.LifetimeDefinition
 import com.jetbrains.rider.build.BuildHost
 import com.wollumestudios.csharprepl.ReplSession
-import com.wollumestudios.csharprepl.WatchedProject
 import java.io.File
+import java.nio.file.Path
 
-/** Pure path logic (kept free of platform types so the plain unit tests can load it). */
+/**
+ * A referenced project as the change watcher sees it: [path] is its canonical project file (the key), [dirs] its directory
+ * and ProjectReference closure, [since] the time after which a build output counts as a change.
+ */
+data class WatchedProject(val path: String, val name: String, val dirs: List<String>, val since: Long)
+
+/** Pure logic of the change watcher (no platform types, so the plain unit tests can load it). */
 object ProjectChangeWatcher {
     private val ignored = setOf("bin", "obj", ".idea", ".vs")
 
@@ -24,6 +30,20 @@ object ProjectChangeWatcher {
             val d = normalize(dir)
             path.startsWith("$d/") && path.substring(d.length + 1).split('/').none { it in ignored }
         }
+    }
+
+    /** A build changed the project when one of its output files ([mtimes]) is newer than [since]. */
+    fun builtSince(mtimes: Sequence<Long>, since: Long) = mtimes.any { it > since }
+
+    /** Raising the banner for [path] moves its `since` to [now]: after Ignore, only newer build outputs raise it again. */
+    fun raised(watched: List<WatchedProject>, path: String, now: Long) =
+        watched.map { if (it.path == path) it.copy(since = now) else it }
+
+    /** One spelling per file (real path when it exists, else absolute and normalized), so two routes to a project don't reference it twice. */
+    fun canonical(path: String): String = try {
+        Path.of(path).toRealPath().toString()
+    } catch (e: Exception) { // missing file, or an invalid path
+        runCatching { Path.of(path).toAbsolutePath().normalize().toString() }.getOrDefault(path)
     }
 
     // ponytail: always case-insensitive (Windows); on a case-sensitive file system this only risks an extra banner
@@ -39,13 +59,13 @@ class ProjectChangeListener(private val project: Project) : BulkFileListener {
         val session = project.serviceIfCreated<ReplSession>() ?: return
         val watched = session.watched.takeIf { it.isNotEmpty() } ?: return
         val hit = watched.firstOrNull { w -> events.any { ProjectChangeWatcher.isRelevant(it.path, w.dirs) } } ?: return
-        ApplicationManager.getApplication().invokeLater({ session.projectChanged(hit.name) }, project.disposed)
+        ApplicationManager.getApplication().invokeLater({ session.projectChanged(hit.path) }, project.disposed)
     }
 
     companion object {
         /**
          * Rider builds run in its backend: ProjectTaskListener does not fire for them, BuildHost.building does. After a build,
-         * a referenced project whose bin/ got a file newer than the reference counts as changed.
+         * a referenced project whose bin/ got a file newer than its `since` counts as changed.
          */
         fun watchBuilds(project: Project, parent: Disposable) {
             val lifetime = LifetimeDefinition()
@@ -55,7 +75,7 @@ class ProjectChangeListener(private val project: Project) : BulkFileListener {
                 if (wasBuilding && !building) ApplicationManager.getApplication().executeOnPooledThread {
                     val session = project.serviceIfCreated<ReplSession>() ?: return@executeOnPooledThread
                     session.watched.firstOrNull(::builtSince)?.let { w ->
-                        ApplicationManager.getApplication().invokeLater({ session.projectChanged(w.name) }, project.disposed)
+                        ApplicationManager.getApplication().invokeLater({ session.projectChanged(w.path) }, project.disposed)
                     }
                 }
                 wasBuilding = building
@@ -63,7 +83,8 @@ class ProjectChangeListener(private val project: Project) : BulkFileListener {
         }
 
         // ponytail: looks in <project dir>/bin only; a custom OutputPath/ArtifactsPath is missed (the save watcher still covers source edits)
-        private fun builtSince(w: WatchedProject) =
-            w.dirs.any { dir -> File(dir, "bin").walk().any { it.isFile && it.lastModified() > w.since } }
+        private fun builtSince(w: WatchedProject) = w.dirs.any { dir ->
+            ProjectChangeWatcher.builtSince(File(dir, "bin").walk().filter { it.isFile }.map { it.lastModified() }, w.since)
+        }
     }
 }

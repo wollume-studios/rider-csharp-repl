@@ -56,6 +56,7 @@ import com.wollumestudios.csharprepl.settings.ReplSettings
 import com.wollumestudios.csharprepl.settings.ReplSettingsListener
 import com.wollumestudios.csharprepl.settings.VariablesPosition
 import java.awt.BorderLayout
+import javax.swing.JComponent
 import javax.swing.JPanel
 
 /**
@@ -85,7 +86,11 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             additionalColumnsCount = 0
         }
     }
-    private var rendered = 0
+    /** The entries as rendered (compared by identity with the session's) and where each starts in the document. */
+    private val shown = mutableListOf<HistoryEntry>()
+    private val starts = mutableListOf<Int>()
+    /** Where [render] inserts next. */
+    private var cursor = 0
     private var renderedResets = 0
     private var shownVariables: List<Var>? = null
 
@@ -138,7 +143,8 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             add(banner, BorderLayout.NORTH) // the banner slot
             add(splitter, BorderLayout.CENTER)
         })
-        transferHandler = drop
+        // Drops anywhere in the window reference projects/DLLs; the editors take them through their drop handler instead.
+        drop.installOn(this, pendingBox, pendingText, variables, variables.table, variables.table.parent as JComponent)
 
         val group = ActionManager.getInstance().getAction("CSharpRepl.Toolbar") as ActionGroup
         toolbar = ActionManager.getInstance().createActionToolbar("CSharpReplToolbar", group, true).also { it.targetComponent = this }.component
@@ -235,12 +241,21 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             renderedResets = session.resets
             history.markupModel.removeAllHighlighters()
             runWriteAction { history.document.setText("") }
-            rendered = 0
+            shown.clear()
+            starts.clear()
             inputHistory.reset()
         }
-        if (entries.size > rendered) {
-            runWriteAction { entries.subList(rendered, entries.size).forEach(::render) }
-            rendered = entries.size
+        val changedEntries = shown.indices.filter { entries[it] !== shown[it] } // a "running" entry got its answer
+        if (changedEntries.isNotEmpty() || entries.size > shown.size) {
+            runWriteAction {
+                changedEntries.forEach { rerender(it, entries[it]) }
+                for (i in shown.size until entries.size) {
+                    starts += history.document.textLength
+                    cursor = history.document.textLength
+                    render(entries[i])
+                    shown += entries[i]
+                }
+            }
             history.caretModel.moveToOffset(history.document.textLength)
             history.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
         }
@@ -255,19 +270,34 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         ActivityTracker.getInstance().inc() // Run ↔ Stop, enablement while analyzing
     }
 
+    /** Replaces entry [i]'s text (and its highlighters and links) with [e]'s, shifting the later entries' starts. */
+    private fun rerender(i: Int, e: HistoryEntry) {
+        val start = starts[i]
+        val end = starts.getOrNull(i + 1) ?: history.document.textLength
+        history.markupModel.allHighlighters.filter { it.startOffset >= start && it.endOffset <= end }.forEach(history.markupModel::removeHighlighter)
+        history.document.deleteString(start, end)
+        cursor = start
+        render(e)
+        val delta = (cursor - start) - (end - start)
+        for (j in i + 1 until starts.size) starts[j] += delta
+        shown[i] = e
+    }
+
+    /** Inserts [e] at [cursor] (the end, or an entry's place when it is re-rendered). */
     private fun render(e: HistoryEntry) {
         if (e.status == "note") return append(e.output + "\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         append("> ", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         appendCode(e.code.replace("\n", "\n  ") + "\n")
+        if (e.status == "running") append("  (running…)\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         if (e.output.isNotEmpty()) append(indent(e.output.trimEnd('\n', '\r')) + "\n", null)
         e.result?.let { appendCode(indent(it) + "\n") }
         e.diagnostics.forEach { append(indent(it) + "\n", ConsoleViewContentType.ERROR_OUTPUT_KEY) }
         e.exception?.let {
             append(indent(it), ConsoleViewContentType.ERROR_OUTPUT_KEY)
             if (e.status == "threw") {
-                val start = history.document.textLength + 3
+                val start = cursor + 3
                 append("   [inspect ›]", null)
-                EditorHyperlinkSupport.get(history).createHyperlink(start, history.document.textLength, null, HyperlinkInfo { variables.select("\$exception") })
+                EditorHyperlinkSupport.get(history).createHyperlink(start, cursor, null, HyperlinkInfo { variables.select("\$exception") })
             }
             append("\n", null)
         }
@@ -276,8 +306,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     private fun indent(text: String) = "  " + text.replace("\n", "\n  ")
 
     private fun append(text: String, key: TextAttributesKey?) {
-        val start = history.document.textLength
+        val start = cursor
         history.document.insertString(start, text)
+        cursor += text.length
         if (key != null) history.markupModel.addRangeHighlighter(key, start, start + text.length, HighlighterLayer.SYNTAX, HighlighterTargetArea.EXACT_RANGE)
     }
 
@@ -286,8 +317,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
      * can't recolor the rest of the history.
      */
     private fun appendCode(code: String) {
-        val start = history.document.textLength
+        val start = cursor
         history.document.insertString(start, code)
+        cursor += code.length
         val lexer = syntax.highlightingLexer
         lexer.start(code)
         while (true) {
