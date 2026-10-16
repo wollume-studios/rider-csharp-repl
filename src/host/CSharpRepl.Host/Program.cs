@@ -13,13 +13,14 @@ public static class Program
         Console.SetOut(TextWriter.Null);
         Console.SetError(TextWriter.Null);
         Console.SetIn(TextReader.Null); // user Console.ReadLine() must not consume protocol input
+        try { ReferenceBuilder.CleanOldSnapshots(); } catch (Exception) { } // housekeeping must never stop the host
         var input = CreateInputReader(Console.OpenStandardInput());
         await RunLoop(input, protocolOut, new ReplEngine());
     }
 
     public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
 
-    /// <summary>Reads requests until EOF. `run`, `variables` and `expand` (which can execute user code) go through one sequential queue; `analyze` is answered immediately.</summary>
+    /// <summary>Reads requests until EOF. `run`, `variables`, `expand` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
     public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine)
     {
         var writer = new ProtocolWriter(output);
@@ -38,7 +39,7 @@ public static class Program
             catch (JsonException e) { writer.Error(0, "invalid request: " + e.Message); continue; }
             if (request == null) { writer.Error(0, "invalid request"); continue; }
 
-            if (request.Cmd is "run" or "variables" or "expand") await runs.Writer.WriteAsync(request);
+            if (request.Cmd is "run" or "variables" or "expand" or "addReference") await runs.Writer.WriteAsync(request);
             else await Handle(request, writer, engine);
         }
 
@@ -65,10 +66,18 @@ public static class Program
                 case "expand":
                     writer.Ok(request.Id, new ExpandResponse(engine.Expand(request.Handle ?? throw new ArgumentException("handle required"))));
                     break;
+                case "addReference":
+                    var built = await engine.AddReferenceAsync(request.Kind ?? "", request.Path, request.Name, request.Version);
+                    writer.Ok(request.Id, new AddReferenceResponse(built.Assemblies, built.SourceDirs));
+                    break;
                 default:
                     writer.Error(request.Id, "unknown command: " + request.Cmd);
                     break;
             }
+        }
+        catch (ReferenceException e)
+        {
+            writer.Error(request.Id, e.Message);
         }
         catch (Exception e)
         {

@@ -129,6 +129,27 @@ public class ProtocolLoopTests
     }
 
     [Fact]
+    public async Task Loop_AddReference_ReturnsAssembliesAndSurvivesErrors()
+    {
+        using var s = new Session();
+        var csproj = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Fixtures", "SampleLib", "SampleLib.csproj");
+        await s.Send(new { id = 1, cmd = "addReference", kind = "project", path = Path.GetFullPath(csproj) });
+        var added = await s.Receive();
+        Assert.True(added.GetProperty("ok").GetBoolean(), added.ToString());
+        Assert.Contains(added.GetProperty("assemblies").EnumerateArray(), a => a.GetString()!.EndsWith("SampleLib.dll"));
+        Assert.Single(added.GetProperty("sourceDirs").EnumerateArray());
+
+        await s.Send(new { id = 2, cmd = "addReference", kind = "dll", path = "no-such.dll" });
+        var failed = await s.Receive();
+        Assert.False(failed.GetProperty("ok").GetBoolean());
+        Assert.Contains("no-such.dll", failed.GetProperty("error").GetString());
+
+        await s.Send(new { id = 3, cmd = "run", code = "SampleLib.Greeter.Hi(\"p\")" });
+        Assert.Equal("\"Hi p\"", (await s.Receive()).GetProperty("result").GetString());
+        await s.Finish();
+    }
+
+    [Fact]
     public async Task Loop_UnknownCommand_IsError()
     {
         using var s = new Session();
