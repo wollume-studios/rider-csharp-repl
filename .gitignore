@@ -26,3 +26,4 @@ _dotTrace*
 
 # UI test runs (Starter copies the Rider installation here)
 out/
+*.hprof
