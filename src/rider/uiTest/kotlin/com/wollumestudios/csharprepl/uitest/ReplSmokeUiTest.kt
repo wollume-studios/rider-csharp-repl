@@ -2,6 +2,7 @@ package com.wollumestudios.csharprepl.uitest
 
 import com.intellij.driver.client.Driver
 import com.intellij.driver.client.Remote
+import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
@@ -81,7 +82,8 @@ class ReplSmokeUiTest {
                 ?: null.also { println("Solution Explorer: $paths"); paths.filter { it.path.size == 1 }.forEach { tree.fixture.expandRow(it.row) } }
         }
         waitFor("Greeter selected", timeout = 1.minutes) {
-            tree.fixture.selectRow(greeter.row)
+            // Through the tree's API, not the fixture's robot click: that needs the test IDE in front (it fails while another window has focus).
+            withContext(OnDispatcher.EDT) { cast(tree.component, JTree::class).setSelectionRow(greeter.row) }
             val selected = tree.collectSelectedPaths().map { it.path }
             println("Solution Explorer: row ${greeter.row} ${greeter.path}; selected: $selected")
             selected.singleOrNull()?.lastOrNull()?.startsWith("Greeter") == true
@@ -157,6 +159,11 @@ private const val PLUGIN = "com.wollumestudios.csharprepl"
 @Remote("com.wollumestudios.csharprepl.ui.ReplPanel", plugin = PLUGIN)
 interface ReplPanel {
     fun getInput(): EditorTextField
+}
+
+@Remote("javax.swing.JTree")
+interface JTree {
+    fun setSelectionRow(row: Int)
 }
 
 @Remote("com.intellij.ui.EditorTextField")
