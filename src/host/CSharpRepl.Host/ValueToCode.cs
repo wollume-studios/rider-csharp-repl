@@ -10,10 +10,17 @@ namespace CSharpRepl.Host;
 public static class ValueToCode
 {
     private const int MaxDepth = 5;
+    private const int MaxItems = 1000;
 
     // Namespaces needing no qualification in the REPL's imports and in a file-based app's implicit usings.
     private static readonly HashSet<string> Imported =
         ["System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Threading.Tasks"];
+
+    /// <summary>The identifier as it must be written in code: keywords get an @ prefix.</summary>
+    public static string Ident(string name) =>
+        Microsoft.CodeAnalysis.CSharp.SyntaxFacts.GetKeywordKind(name) != Microsoft.CodeAnalysis.CSharp.SyntaxKind.None
+        || Microsoft.CodeAnalysis.CSharp.SyntaxFacts.GetContextualKeywordKind(name) != Microsoft.CodeAnalysis.CSharp.SyntaxKind.None
+            ? "@" + name : name;
 
     /// <param name="declared">The variable's declared type: a different runtime type gets a cast, null gets a typed null.</param>
     /// <param name="replTypes">False when the code will live outside the session, where types declared in the REPL don't exist.</param>
@@ -22,7 +29,7 @@ public static class ValueToCode
         try
         {
             var e = new Emitter(replTypes);
-            if (v is null) code = $"({e.TypeName(declared)}{(declared.IsValueType ? "" : "?")})null";
+            if (v is null) code = e.TypedNull(declared);
             else
             {
                 code = e.Value(v, 0);
@@ -96,10 +103,11 @@ public static class ValueToCode
         {
             var t = e.GetType();
             var name = TypeName(t);
-            if (Enum.IsDefined(t, e)) return $"{name}.{e}";
-            var s = e.ToString();
-            if (t.IsDefined(typeof(FlagsAttribute), false) && !char.IsDigit(s[0]) && s[0] != '-')
-                return "(" + string.Join(" | ", s.Split(", ").Select(n => $"{name}.{n}")) + ")";
+            if (Enum.IsDefined(t, e)) return $"{name}.{Ident(e.ToString())}";
+            var names = e.ToString().Split(", ");
+            // "R, W" is a flags combination; "R, W, 4" (undefined bits) or "7" are not, and fall back to the cast.
+            if (t.IsDefined(typeof(FlagsAttribute), false) && names.All(n => Enum.GetNames(t).Contains(n)))
+                return "(" + string.Join(" | ", names.Select(n => $"{name}.{Ident(n)}")) + ")";
             return $"({name})({Convert.ToDecimal(e, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)})";
         }
 
@@ -138,20 +146,50 @@ public static class ValueToCode
             }
             if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
                 return $"new {TypeName(t)}({Value(t.GetProperty("Key")!.GetValue(v), depth + 1)}, {Value(t.GetProperty("Value")!.GetValue(v), depth + 1)})";
-            if (v is IDictionary dict)
+            var generic = t.GetInterfaces().Where(i => i.IsGenericType).ToArray();
+            var generalDict = generic.FirstOrDefault(i => i.GetGenericTypeDefinition() == typeof(IDictionary<,>));
+            if (generalDict != null || v is IDictionary) return Dictionary(v, t, generalDict, depth);
+            if (generic.FirstOrDefault(i => i.GetGenericTypeDefinition() == typeof(ICollection<>)) is { } collection)
             {
-                RequireMutableWithDefaultCtor(t, dict.IsReadOnly || dict.IsFixedSize);
-                var entries = new List<string>();
-                for (var e = dict.GetEnumerator(); e.MoveNext();) entries.Add($"[{Value(e.Key, depth + 1)}] = {Value(e.Value, depth + 1)}");
-                return entries.Count == 0 ? $"new {TypeName(t)}()" : $"new {TypeName(t)} {{ {string.Join(", ", entries)} }}";
-            }
-            if (t.GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ICollection<>)) is { } collection)
-            {
+                var element = collection.GetGenericArguments()[0];
+                // A collection initializer calls a public Add(T); explicit-interface-only collections (LinkedList, ExpandoObject) can't be written that way.
                 RequireMutableWithDefaultCtor(t, (bool)collection.GetProperty("IsReadOnly")!.GetValue(v)!);
+                if (t.GetMethod("Add", [element]) is not { IsPublic: true, IsStatic: false }) throw new NotSupportedException("no public Add");
                 return Initialized(TypeName(t), (IEnumerable)v, depth);
             }
             if (v is IEnumerable) throw new NotSupportedException("unsupported collection");
             return Object(v, t, depth);
+        }
+
+        private string Dictionary(object v, Type t, Type? generalDict, int depth)
+        {
+            var (key, val) = generalDict is null ? (typeof(object), typeof(object)) : (generalDict.GetGenericArguments()[0], generalDict.GetGenericArguments()[1]);
+            var readOnly = generalDict is null ? ((IDictionary)v).IsReadOnly || ((IDictionary)v).IsFixedSize
+                : (bool)typeof(ICollection<>).MakeGenericType(typeof(KeyValuePair<,>).MakeGenericType(key, val)).GetProperty("IsReadOnly")!.GetValue(v)!;
+            RequireMutableWithDefaultCtor(t, readOnly);
+
+            var pairs = new List<(object? Key, object? Value)>();
+            if (generalDict is null) for (var e = ((IDictionary)v).GetEnumerator(); e.MoveNext();) pairs.Add((e.Key, e.Value));
+            else
+            {
+                var pair = typeof(KeyValuePair<,>).MakeGenericType(key, val);
+                foreach (var item in (IEnumerable)v) pairs.Add((pair.GetProperty("Key")!.GetValue(item), pair.GetProperty("Value")!.GetValue(item)));
+            }
+            Cap(pairs.Count);
+
+            var type = TypeName(t);
+            if (pairs.Count == 0) return $"new {type}()";
+            string entry((object? Key, object? Value) p) => t.GetProperty("Item", val, [key]) is { SetMethod.IsPublic: true } || t.GetProperty("Item", [key]) is { SetMethod.IsPublic: true }
+                ? $"[{Value(p.Key, depth + 1)}] = {Value(p.Value, depth + 1)}"
+                : t.GetMethod("Add", [key, val]) is { IsPublic: true, IsStatic: false }
+                    ? $"{{ {Value(p.Key, depth + 1)}, {Value(p.Value, depth + 1)} }}"
+                    : throw new NotSupportedException("no public indexer or Add");
+            return $"new {type} {{ {string.Join(", ", pairs.Select(entry))} }}";
+        }
+
+        private static void Cap(int count)
+        {
+            if (count > MaxItems) throw new NotSupportedException($"{count} elements");
         }
 
         private static void RequireMutableWithDefaultCtor(Type t, bool readOnly)
@@ -161,7 +199,9 @@ public static class ValueToCode
 
         private string Initialized(string type, IEnumerable items, int depth)
         {
-            var parts = items.Cast<object?>().Select(i => Value(i, depth + 1)).ToArray();
+            var all = items.Cast<object?>().ToArray();
+            Cap(all.Length);
+            var parts = all.Select(i => Value(i, depth + 1)).ToArray();
             return parts.Length == 0 ? (type.EndsWith(']') ? $"new {type} {{ }}" : $"new {type}()") : $"new {type} {{ {string.Join(", ", parts)} }}";
         }
 
@@ -178,7 +218,7 @@ public static class ValueToCode
         {
             var members = Members(t).ToArray();
             if (t.IsDefined(typeof(CompilerGeneratedAttribute), false) && t.Name.Contains("AnonymousType"))
-                return $"new {{ {string.Join(", ", members.Select(m => $"{m.Name} = {Value(m.Get(v), depth + 1)}"))} }}";
+                return $"new {{ {string.Join(", ", members.Select(m => $"{Ident(m.Name)} = {ValueOrTypedNull(m.Get(v), m.Type, depth + 1)}"))} }}";
 
             // Only user types: framework objects (StringBuilder, Stream, Task, ...) hold state this can't see.
             if (t.Namespace is { } ns && (ns == "System" || ns.StartsWith("System.") || ns.StartsWith("Microsoft."))) throw new NotSupportedException("framework type");
@@ -193,13 +233,19 @@ public static class ValueToCode
             if (ctor == null && !t.IsValueType) throw new NotSupportedException("no usable constructor");
 
             ctor ??= [];
-            var args = ctor.Select(p => Value(members.First(m => Same(m.Name, p.Name)).Get(v), depth + 1)).ToArray();
+            var args = ctor.Select(p => ValueOrTypedNull(members.First(m => Same(m.Name, p.Name)).Get(v), p.ParameterType, depth + 1)).ToArray();
             var init = members.Where(m => m.Settable && !ctor.Any(p => Same(m.Name, p.Name)))
-                .Select(m => $"{m.Name} = {Value(m.Get(v), depth + 1)}").ToArray();
+                .Select(m => $"{Ident(m.Name)} = {Value(m.Get(v), depth + 1)}").ToArray();
             var code = "new " + TypeName(t);
             if (args.Length > 0 || init.Length == 0) code += $"({string.Join(", ", args)})";
             return init.Length == 0 ? code : $"{code} {{ {string.Join(", ", init)} }}";
         }
+
+        /// <summary>null needs its type where it can't be inferred (anonymous members, constructor overload resolution).</summary>
+        private string ValueOrTypedNull(object? v, Type declared, int depth) =>
+            v is null ? TypedNull(declared) : Value(v, depth);
+
+        public string TypedNull(Type declared) => $"({TypeName(declared)}{(declared.IsValueType ? "" : "?")})null";
 
         private static bool Same(string a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
@@ -226,10 +272,10 @@ public static class ValueToCode
                 }
                 else prefix = TypeName(outer) + ".";
             }
-            else prefix = t.Namespace == null || Imported.Contains(t.Namespace) ? "" : t.Namespace + ".";
+            else prefix = t.Namespace == null || Imported.Contains(t.Namespace) ? "" : string.Join(".", t.Namespace.Split('.').Select(Ident)) + ".";
 
             var name = t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name;
-            return prefix + name + (own.Length > 0 ? "<" + string.Join(", ", own.Select(TypeName)) + ">" : "");
+            return prefix + Ident(name) + (own.Length > 0 ? "<" + string.Join(", ", own.Select(TypeName)) + ">" : "");
         }
     }
 }

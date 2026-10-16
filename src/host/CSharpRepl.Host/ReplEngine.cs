@@ -201,7 +201,9 @@ public sealed partial class ReplEngine
         var bad = new List<string>();
         foreach (var (name, type, value) in Declared())
         {
-            if (ValueToCode.TryToCode(value, type, out var code, replTypes)) lines.Add($"var {name} = {code};");
+            // In a dump the variables become top-level statements, where `args` already exists (CS0136), so it is renamed.
+            var declared = ValueToCode.Ident(!replTypes && name == "args" ? "args_" : name);
+            if (ValueToCode.TryToCode(value, type, out var code, replTypes)) lines.Add($"var {declared} = {code};");
             else
             {
                 bad.Add(name);
