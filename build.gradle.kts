@@ -1,3 +1,6 @@
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 
 plugins {
@@ -38,13 +41,43 @@ val unitTest by tasks.registering(Test::class) {
     systemProperty("csharprepl.host", layout.buildDirectory.file("host/CSharpRepl.Host.dll").get().asFile.absolutePath)
 }
 
+// UI tests: a real Rider with the built plugin and samples/SampleSolution, driven through actions and IDE APIs (no OS
+// mouse/keyboard, so they don't need focus). Rider from CSHARPREPL_RIDER, else %LOCALAPPDATA%\Programs\Rider.
+val uiTest by tasks.registering(Test::class) {
+    description = "UI tests in a real Rider (slow; see src/rider/uiTest)"
+    group = "verification"
+    val uiTestSources = sourceSets.getByName("uiTest")
+    testClassesDirs = uiTestSources.output.classesDirs
+    classpath = uiTestSources.runtimeClasspath
+    useJUnitPlatform { excludeEngines("junit-vintage") } // Starter brings the vintage engine without JUnit 4
+    val prepareSandbox = tasks.named<PrepareSandboxTask>("prepareSandbox")
+    dependsOn(prepareSandbox)
+    val pluginDir = prepareSandbox.flatMap { it.pluginDirectory }
+    val rider = providers.environmentVariable("CSHARPREPL_RIDER")
+    jvmArgumentProviders += CommandLineArgumentProvider {
+        listOfNotNull(
+            "-Dcsharprepl.plugin=${pluginDir.get().asFile.absolutePath}",
+            "-Dcsharprepl.sample=${file("samples/SampleSolution").absolutePath}",
+            // Sample copies and their build output: on disk, not in a small /tmp RAM disk.
+            "-Djava.io.tmpdir=${layout.buildDirectory.dir("ui-test-tmp").get().asFile.apply { mkdirs() }.absolutePath}",
+            rider.orNull?.let { "-Dcsharprepl.rider=$it" },
+        )
+    }
+    testLogging { events("passed", "failed", "skipped"); showStandardStreams = true }
+}
+
 tasks.test {
     enabled = false // the IntelliJ test harness is not needed; see unitTest
     dependsOn(unitTest)
 }
 
-// The plugin version is parsed as System.Version by the Rider backend: at most 4 parts, each <= Int32.MaxValue.
-version = (extra["PluginVersion"] as String).also { v ->
+// publishLocal stamps a build number so Rider sees every local build as an update.
+val isLocalPublish = gradle.startParameter.taskNames.any { it.substringAfterLast(':') == "publishLocal" }
+// The plugin version must parse as System.Version (as for a Rider backend): at most 4 parts, each <= Int32.MaxValue.
+version = (extra["PluginVersion"] as String).let { base ->
+    if (!isLocalPublish) base
+    else base.split('.').take(2).joinToString(".") + "." + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyMMdd.HHmm"))
+}.also { v ->
     val parts = v.split('.')
     require(parts.size <= 4 && parts.all { it.toLongOrNull()?.let { n -> n in 0..Int.MAX_VALUE } == true }) {
         "Plugin version '$v' is not a valid System.Version (max 4 numeric parts, each <= ${Int.MAX_VALUE})"
@@ -60,7 +93,13 @@ sourceSets {
     test {
         kotlin.srcDir("src/rider/test/kotlin")
     }
+    // UI tests: Starter launches a real Rider with the built plugin, Driver talks to it (see src/rider/uiTest).
+    create("uiTest") {
+        kotlin.srcDir("src/rider/uiTest/kotlin")
+    }
 }
+
+val uiTestImplementation: Configuration by configurations.getting
 
 dependencies {
     intellijPlatform {
@@ -79,6 +118,56 @@ dependencies {
     unitTestRuntime("com.google.code.gson:gson:2.11.0")
     unitTestRuntime("org.junit.jupiter:junit-jupiter:5.13.4")
     unitTestRuntime("org.junit.platform:junit-platform-launcher:1.13.4")
+
+    intellijPlatform {
+        // Pinned: the UI tests drive any Rider (CSHARPREPL_RIDER) with one Starter/Driver, whatever ProductVersion builds the plugin.
+        testFramework(TestFrameworkType.Starter, version = "263.6800.24", configurationName = "uiTestImplementation")
+    }
+    uiTestImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    uiTestImplementation("org.junit.platform:junit-platform-launcher:1.13.4")
+    uiTestImplementation("org.kodein.di:kodein-di-jvm:7.20.2")
+    // Starter needs runBlockingK from JetBrains' coroutines fork: take the one this Rider ships, or with an older
+    // ProductVersion the one of a 2026.3 Rider (-PuiTestCoroutinesJar=<rider>/lib/intellij.libraries.kotlinx.coroutines.core.jar).
+    "uiTestCompileOnly"("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.1")
+    val coroutinesJar = providers.gradleProperty("uiTestCoroutinesJar")
+    "uiTestRuntimeOnly"(if (coroutinesJar.isPresent) files(coroutinesJar.get()) else files(configurations.named("intellijPlatformClasspath").map { platform ->
+        platform.filter { it.name == "intellij.libraries.kotlinx.coroutines.core.jar" }
+    }))
+}
+
+// Local plugin repository: Settings › Plugins › ⚙ › Manage Plugin Repositories… › add the printed updatePlugins.xml URL.
+// ./gradlew publishLocal [-PlocalRepoDir=<dir>]
+val publishLocal by tasks.registering {
+    group = "publishing"
+    description = "Publish the plugin zip to a local custom plugin repository (updatePlugins.xml)"
+    dependsOn(tasks.buildPlugin)
+    val repoDir = providers.gradleProperty("localRepoDir")
+        .orElse(System.getProperty("user.home") + "/.csharprepl/plugin-repo")
+    val zip = tasks.buildPlugin.flatMap { it.archiveFile }
+    val pluginId = providers.gradleProperty("RiderPluginId").get()
+    val pluginVersion = version.toString()
+    doLast {
+        val dir = file(repoDir.get()).apply { mkdirs() }
+        val target = File(dir, zip.get().asFile.name)
+        zip.get().asFile.copyTo(target, overwrite = true)
+        // keep the three newest builds
+        dir.listFiles { f -> f.extension == "zip" }!!.sortedByDescending { it.lastModified() }.drop(3).forEach { it.delete() }
+        val xml = File(dir, "updatePlugins.xml")
+        xml.writeText(
+            """
+            |<?xml version="1.0" encoding="UTF-8"?>
+            |<plugins>
+            |  <plugin id="$pluginId" url="${target.toPath().toUri()}" version="$pluginVersion">
+            |    <idea-version since-build="263"/>
+            |    <name>C# REPL</name>
+            |    <vendor>Wollume Studios</vendor>
+            |    <description>C# REPL tool window for Rider (replacement for C# Interactive).</description>
+            |  </plugin>
+            |</plugins>
+            |""".trimMargin()
+        )
+        println("C# REPL $pluginVersion published. Repository URL: ${xml.toPath().toUri()}")
+    }
 }
 
 tasks.runIde {
@@ -94,6 +183,24 @@ tasks.runIde {
 tasks.patchPluginXml {
     sinceBuild.set("263")
     untilBuild.set(provider { null })
+
+    // docs/plugin-description.html; images need public URLs (Marketplace, Settings › Plugins), e.g.
+    // -PScreenshotBaseUrl=https://raw.githubusercontent.com/wollume-studios/rider-csharp-repl/main/docs/screenshots
+    val screenshotBaseUrl = providers.gradleProperty("ScreenshotBaseUrl").orElse("")
+    val descriptionFile = file("${rootDir}/docs/plugin-description.html")
+    inputs.file(descriptionFile)
+    pluginDescription.set(screenshotBaseUrl.map { base ->
+        val html = descriptionFile.readText().replace(Regex("""(?s)<!--.*?-->\s*"""), "")
+        if (base.isBlank()) html.replace(Regex("""<p><img [^>]*></p>\s*"""), "")
+        else html.replace("{{screenshots}}", base.trimEnd('/'))
+    })
+
+    // The first section of CHANGELOG.md
+    val changelogFile = file("${rootDir}/CHANGELOG.md")
+    inputs.file(changelogFile)
+    changeNotes.set(provider {
+        Regex("(?s)(-.+?)(?=##|$)").find(changelogFile.readText())!!.groups[1]!!.value.replace(Regex("\r?\n"), "<br />\n")
+    })
 }
 
 // All sandbox tasks (buildPlugin uses prepareSandbox, runIde uses prepareSandbox_runIde): ship the published host.

@@ -11,7 +11,9 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CustomShortcutSet
+import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.runWriteAction
+import com.intellij.openapi.command.CommandProcessor
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.command.undo.UndoUtil
 import com.intellij.openapi.editor.EditorFactory
@@ -209,7 +211,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     private fun lastLine() = maxOf(0, input.document.lineCount - 1)
 
     private fun bindOnInput(actionId: String, defaultKeys: String) {
-        val action = ActionManager.getInstance().getAction(actionId)
+        val action = ActionUtil.wrap(actionId) // a wrapper: shortcuts of the registered (global) action must not be changed here
         val keymap = KeymapUtil.getActiveKeymapShortcuts(actionId)
         action.registerCustomShortcutSet(if (keymap.shortcuts.isNotEmpty()) keymap else CustomShortcutSet.fromString(defaultKeys), input)
     }
@@ -240,14 +242,14 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         if (session.resets != renderedResets) {
             renderedResets = session.resets
             history.markupModel.removeAllHighlighters()
-            runWriteAction { history.document.setText("") }
+            writeHistory { history.document.setText("") }
             shown.clear()
             starts.clear()
             inputHistory.reset()
         }
         val changedEntries = shown.indices.filter { entries[it] !== shown[it] } // a "running" entry got its answer
         if (changedEntries.isNotEmpty() || entries.size > shown.size) {
-            runWriteAction {
+            writeHistory {
                 changedEntries.forEach { rerender(it, entries[it]) }
                 for (i in shown.size until entries.size) {
                     starts += history.document.textLength
@@ -302,6 +304,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             append("\n", null)
         }
     }
+
+    /** History document changes: outside a command the platform rejects them (IncorrectOperationException); undo is off for it anyway. */
+    private fun writeHistory(block: () -> Unit) = CommandProcessor.getInstance().runUndoTransparentAction { runWriteAction(block) }
 
     private fun indent(text: String) = "  " + text.replace("\n", "\n  ")
 

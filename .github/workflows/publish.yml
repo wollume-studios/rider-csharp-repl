@@ -1,0 +1,34 @@
+# Uploads the plugin to JetBrains Marketplace. The very first version must be uploaded by hand on
+# plugins.jetbrains.com; after that, run this workflow manually or push a tag like v0.1.0.
+name: Publish to JetBrains Marketplace
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel (empty = Stable)
+        default: eap
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Tests
+        run: dotnet test CSharpRepl.sln
+      - name: Publish
+        shell: bash
+        run: ./gradlew publishPlugin -PPublishChannel="${{ github.event.inputs.channel || 'eap' }}" --console=plain
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE }}

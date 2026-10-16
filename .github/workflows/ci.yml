@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          # 8.0: the host's target runtime; 10.0: the SDK global.json pins (file-based apps, export round-trip tests)
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Host tests
+        run: dotnet test CSharpRepl.sln
+      - name: Build plugin
+        shell: bash
+        run: ./gradlew unitTest buildPlugin verifyPluginStructure --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: build/distributions/*.zip

@@ -1,0 +1,49 @@
+<!-- Plugin description (Marketplace and Settings › Plugins). build.gradle.kts copies it into plugin.xml and turns
+     {{screenshots}} into the ScreenshotBaseUrl property; without that property <p><img …></p> paragraphs are left out.
+     Keep the feature text in line with the README. -->
+<p><b>A C# REPL tool window for Rider</b>, the replacement for Rider's C# Interactive window, which Rider 2026.3
+removed. Run C# snippets in a persistent Roslyn scripting session, see your variables, reference your projects, and turn
+the session into a .NET 10 single-file app when it grows.</p>
+
+<h3>REPL</h3>
+<ul>
+  <li><b>Auto-run</b> (toggle, remembered): Enter runs the command and adds a missing <code>;</code> when that completes
+    it; Shift+Enter inserts a new line. In manual mode Enter collects lines until the command is complete and
+    Shift+Enter runs now.</li>
+  <li><b>Nothing runs that you can't see</b>: in manual mode a box shows the pending code that the next complete command
+    will run with, so two commands are never merged silently.</li>
+  <li>History with C# highlighting, console output, results and errors. Up/Down step through earlier commands, Escape
+    clears the input.</li>
+  <li><b>Variables table</b> like the debugger's (Name, Value, Type), with expandable fields and properties. The last
+    exception is <code>$exception</code>; <b>[inspect ›]</b> in the history selects it.</li>
+  <li>The session runs in its own .NET process: a crash, an endless loop or <code>Environment.Exit</code> never takes
+    Rider down. <b>Stop</b> kills a command that does not finish; <b>Reset</b> starts over and keeps the references.</li>
+</ul>
+
+<h3>References</h3>
+<ul>
+  <li>Drag a project from Solution Explorer, or a <code>.csproj</code> / <code>.dll</code> from the file manager, onto
+    the window; or <b>Reference in C# REPL</b> on a project node; or <b>+ Reference</b>: a solution project, a DLL or a
+    NuGet package (name and version). Projects are built first.</li>
+  <li>When a referenced project changes or is built, a banner offers <b>Rebuild</b>, <b>Rebuild and replay</b> the
+    commands, or <b>Rebuild and restore variables</b>, or to ignore the change (once, for the session, forever).</li>
+</ul>
+
+<h3>Single-file apps</h3>
+<ul>
+  <li><b>To Single-File App</b>: the session as a .NET 10 file-based app that compiles and runs like the session
+    (references become <code>#:project</code> / <code>#:package</code> directives); a variant leaves out the commands
+    that threw.</li>
+  <li><b>Dump Variables</b>: a new single-file app with the current variables as C# code.</li>
+  <li><b>New C# Single-File App</b> (File › New), <b>Add Project Reference Directive</b> (editor menu), and dropping a
+    project onto a single-file app's editor inserts <code>#:project</code>.</li>
+</ul>
+
+<h3>Settings</h3>
+<p><i>Settings › Tools › C# REPL</i>: auto-run default, variables table right of the history or below the input, ignore
+project changes forever.</p>
+
+<h3>Requirements</h3>
+<p>Rider 2026.3 or later. A .NET 8 or later runtime runs the session; referencing projects and NuGet packages needs a
+.NET SDK, and running exported single-file apps the .NET 10 SDK. Referenced projects and DLLs target
+<code>net8.0</code> or later, or <code>netstandard2.x</code>.</p>
