@@ -17,7 +17,7 @@
                                  instance="com.wollumestudios.csharprepl.settings.ReplConfigurable"/>
         <notificationGroup id="CSharpRepl" displayType="BALLOON"/>
         <!-- A project dropped on a single-file app's editor (.cs outside the solution's projects, or with #: directives) inserts #:project. -->
-        <customFileDropHandler implementation="com.wollumestudios.csharprepl.singlefile.SingleFileProjectDrop"/>
+        <fileDropHandler implementation="com.wollumestudios.csharprepl.singlefile.SingleFileProjectDrop"/>
     </extensions>
 
     <projectListeners>
@@ -50,9 +50,9 @@
         <action id="CSharpRepl.NewSingleFileApp" class="com.wollumestudios.csharprepl.singlefile.NewSingleFileAppAction">
             <add-to-group group-id="NewGroup" anchor="last"/>
         </action>
-        <action id="CSharpRepl.ExcludeThrown" class="com.wollumestudios.csharprepl.singlefile.ExcludeThrownAction"/>
         <action id="CSharpRepl.DumpVariables" class="com.wollumestudios.csharprepl.singlefile.DumpVariablesAction"/>
         <action id="CSharpRepl.ExportToSingleFile" class="com.wollumestudios.csharprepl.singlefile.ExportToSingleFileAction"/>
+        <action id="CSharpRepl.ExportToSingleFileExcludeThrown" class="com.wollumestudios.csharprepl.singlefile.ExportToSingleFileExcludeThrownAction"/>
         <action id="CSharpRepl.ExportSplitButton" class="com.wollumestudios.csharprepl.singlefile.ExportSplitButtonAction"/>
         <action id="CSharpRepl.AddProjectDirective" class="com.wollumestudios.csharprepl.singlefile.AddProjectDirectiveAction">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
@@ -63,7 +63,6 @@
             <reference ref="CSharpRepl.AddReference"/>
             <reference ref="CSharpRepl.NewSingleFileApp"/>
             <separator/>
-            <reference ref="CSharpRepl.ExcludeThrown"/>
             <reference ref="CSharpRepl.IgnoreChangesForever"/>
             <reference ref="CSharpRepl.Settings"/>
         </group>

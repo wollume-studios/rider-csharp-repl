@@ -22,7 +22,6 @@ class ReplSettings : PersistentStateComponent<ReplSettings.Options> {
         var autoRun = true
         var variablesPosition = VariablesPosition.RIGHT
         var ignoreChangesForever = false
-        var exportExcludeThrown = false
     }
 
     private var options = Options()

@@ -19,7 +19,10 @@ object DirectiveInserter {
     /** A file with `#:` directives, or one that belongs to no solution project. */
     fun isSingleFileApp(text: String, inSolutionProject: Boolean) = !inSolutionProject || hasDirectives(text)
 
-    fun hasDirectives(text: String) = text.lineSequence().any { it.startsWith("#:") }
+    fun hasDirectives(text: CharSequence) = text.lineSequence().any { it.startsWith("#:") }
+
+    /** Cheap hint for menus: a `#!` shebang or `#:` directives. */
+    fun looksLikeSingleFileApp(text: CharSequence) = text.startsWith("#!") || hasDirectives(text)
 
     /** The `.csproj` of the nearest folder above [file] that holds one (SDK-style projects compile every `.cs` below their folder), or null. */
     fun nearestProject(file: File): File? {

@@ -82,4 +82,11 @@ class DirectiveInserterTest {
         assertEquals(proj.canonicalFile, DirectiveInserter.nearestProject(deep)?.canonicalFile)
         assertEquals(null, DirectiveInserter.nearestProject(File(dir, "none/y.cs").also { it.parentFile.mkdirs() }))
     }
+
+    @Test
+    fun `menu hint recognizes a shebang or directives only`() {
+        assertTrue(DirectiveInserter.looksLikeSingleFileApp("#!/usr/bin/env dotnet\nx();"))
+        assertTrue(DirectiveInserter.looksLikeSingleFileApp("// c\n#:package A@1\nx();"))
+        assertFalse(DirectiveInserter.looksLikeSingleFileApp("class C {}"))
+    }
 }
