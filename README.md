@@ -5,8 +5,11 @@ removed. Code runs in a persistent Roslyn scripting session in its own .NET proc
 `Environment.Exit` never takes Rider down. Unlike C# Interactive it never runs code you can't see: a command missing its
 `;` is not silently merged with the next one.
 
-Requirements: Rider 2026.3 or later; a .NET 8+ runtime (runs the session); a .NET SDK for project and NuGet references;
-the .NET 10 SDK to run exported single-file apps. References must target `net8.0`+ or `netstandard2.x`.
+Requirements: Rider 2026.3 or later and the **.NET 8+ SDK** (`dotnet`): it runs the session and builds project and NuGet
+references; the .NET 10 SDK runs exported single-file apps. References must target `net8.0`+ or `netstandard2.x`.
+`dotnet` is looked up on `PATH`, then in `DOTNET_ROOT`, then in the default install locations (`~/.dotnet`,
+`/usr/local/share/dotnet`, `/usr/share/dotnet`, `C:\Program Files\dotnet`), so a Rider started without a shell `PATH`
+finds it too. The session runs in the solution directory, so relative paths and the solution's `global.json` apply.
 
 ## Features
 
