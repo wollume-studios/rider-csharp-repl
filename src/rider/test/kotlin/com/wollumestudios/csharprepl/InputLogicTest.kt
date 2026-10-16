@@ -53,4 +53,24 @@ class InputLogicTest {
         assertEquals("draft", h.down())
         assertEquals(null, h.down())
     }
+
+    @Test
+    fun `history survives shrinking while browsing`() {
+        val list = mutableListOf("a", "b")
+        val h = InputHistory { list }
+        assertEquals("b", h.up("draft"))
+        assertEquals("a", h.up("b"))
+        list.clear() // Reset
+        assertEquals("draft", h.down())
+        assertEquals(null, h.up("x"))
+    }
+
+    @Test
+    fun `an Enter answer is stale when pending, the host or the reset count changed`() {
+        val atKey = EnterSnapshot("var r = 0", generation = 1, resets = 0)
+        assertEquals(false, isStale(atKey, atKey.copy()))
+        assertEquals(true, isStale(atKey, atKey.copy(pending = ""))) // pending ✕ during analyze
+        assertEquals(true, isStale(atKey, atKey.copy(generation = 2))) // Stop / restart / crash
+        assertEquals(true, isStale(atKey, atKey.copy(resets = 1))) // Reset
+    }
 }

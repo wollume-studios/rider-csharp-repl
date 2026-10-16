@@ -59,7 +59,14 @@ class ReplSession(private val project: Project) : Disposable {
     /** Code of runs sent to the current host and not answered yet, in order (the host runs them one by one). */
     private val inFlight = ArrayDeque<String>()
 
-    val history = mutableListOf<HistoryEntry>()
+    private val entries = mutableListOf<HistoryEntry>()
+    val history: List<HistoryEntry> get() = entries
+    /** Bumped by [reset]: the view clears its history display when it changes. */
+    var resets = 0
+        private set
+    /** True while Enter waits for `analyze`: actions that read or change pending/input are disabled meanwhile. */
+    var analyzing = false
+        private set
     val references = mutableListOf<ReferenceInfo>()
     var pending = ""
         private set
@@ -79,28 +86,49 @@ class ReplSession(private val project: Project) : Disposable {
 
     /**
      * Enter (or Shift+Enter) with [input] in the input field: asks the host whether pending + input is complete, applies
-     * [decide] (runs, or moves the line to pending), and completes on the EDT with what the input field must do.
+     * [decide] (runs, or moves the line to pending), and completes on the EDT with what the input field must do, or
+     * with null when the answer came too late (pending code or the session changed meanwhile: nothing ran).
      */
-    fun enter(shift: Boolean, input: String): CompletableFuture<EnterAction> {
-        start()
-        val autoRun = ReplSettings.state.autoRun
-        val before = pending
-        val result = CompletableFuture<EnterAction>()
-        fun apply(analysis: AnalyzeResponse) {
-            val action = decide(autoRun, shift, before, input, analysis)
-            when (action) {
-                is EnterAction.Run -> submit(action.code)
-                is EnterAction.ToPending -> setPending(combine(before, action.line))
-                EnterAction.NewLine -> {}
+    fun enter(shift: Boolean, input: String): CompletableFuture<EnterAction?> {
+        val result = CompletableFuture<EnterAction?>()
+        if (analyzing) return result.apply { complete(null) }
+        setAnalyzing(true)
+        try {
+            start()
+            val autoRun = ReplSettings.state.autoRun
+            val atKey = snapshot()
+            fun apply(analysis: AnalyzeResponse) {
+                try {
+                    val action = if (isStale(atKey, snapshot())) null else decide(autoRun, shift, atKey.pending, input, analysis)
+                    when (action) {
+                        is EnterAction.Run -> submit(action.code)
+                        is EnterAction.ToPending -> setPending(combine(atKey.pending, action.line))
+                        EnterAction.NewLine, null -> {}
+                    }
+                    result.complete(action)
+                } catch (e: Throwable) {
+                    result.completeExceptionally(e)
+                } finally {
+                    setAnalyzing(false)
+                }
             }
-            result.complete(action)
-        }
-        val unknown = AnalyzeResponse(false, null) // Shift+Enter doesn't need an answer; a dead host answers nothing
-        if (shift) apply(unknown)
-        else request("analyze", mapOf("code" to combine(before, input))).whenComplete { json, _ ->
-            onEdt { apply(json?.let { gson.fromJson(it, AnalyzeResponse::class.java) } ?: unknown) }
+            val unknown = AnalyzeResponse(false, null) // Shift+Enter doesn't need an answer; a dead host answers nothing
+            if (shift) apply(unknown)
+            else request("analyze", mapOf("code" to combine(atKey.pending, input))).whenComplete { json, _ ->
+                onEdt { apply(json?.let { gson.fromJson(it, AnalyzeResponse::class.java) } ?: unknown) }
+            }
+        } catch (e: Throwable) {
+            setAnalyzing(false)
+            result.completeExceptionally(e)
         }
         return result
+    }
+
+    private fun snapshot() = EnterSnapshot(pending, generation, resets)
+
+    private fun setAnalyzing(value: Boolean) {
+        analyzing = value
+        changed()
     }
 
     /** Runs [code] as is, appends it to the history, then refreshes the variables. Clears pending. */
@@ -134,14 +162,15 @@ class ReplSession(private val project: Project) : Disposable {
 
     /** Kills a run that doesn't finish: a fresh host, references kept, variables lost. */
     fun stop() {
-        inFlight.forEach { history += HistoryEntry(it, "stopped") }
+        inFlight.forEach { entries += HistoryEntry(it, "stopped") }
         restart(RestartMode.Empty)
         append(HistoryEntry.note("Stopped — session restarted, variables lost"))
     }
 
     /** A fresh session: history, pending code and variables cleared, references kept. */
     fun reset() {
-        history.clear()
+        entries.clear()
+        resets++
         setPending("")
         restart(RestartMode.Empty)
     }
@@ -201,7 +230,7 @@ class ReplSession(private val project: Project) : Disposable {
             val note = HistoryEntry.note("dotnet not found on PATH — install the .NET 8+ SDK")
             if (history.lastOrNull() != note) append(note)
             null
-        }
+        } ?: return
         references.forEach { ref -> // queued in order, before any run
             request("addReference", referenceFields(ref)).whenComplete { _, error ->
                 if (error != null) onEdt { if (gen == generation) append(HistoryEntry.note("Reference ${ref.pathOrName} not re-added: ${(error.cause ?: error).message}")) }
@@ -246,7 +275,7 @@ class ReplSession(private val project: Project) : Disposable {
     }
 
     private fun append(entry: HistoryEntry) {
-        history += entry
+        entries += entry
         changed()
     }
 

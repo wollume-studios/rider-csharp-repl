@@ -1,6 +1,5 @@
 package com.wollumestudios.csharprepl.ui
 
-import com.intellij.icons.AllIcons
 import com.intellij.ide.ActivityTracker
 import com.intellij.execution.impl.EditorHyperlinkSupport
 import com.intellij.execution.filters.HyperlinkInfo
@@ -26,15 +25,19 @@ import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.PlainSyntaxHighlighter
+import com.intellij.openapi.fileTypes.SyntaxHighlighter
 import com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
+import com.intellij.openapi.keymap.KeymapUtil
+import com.intellij.openapi.actionSystem.ActionToolbar
+import com.intellij.openapi.actionSystem.impl.ActionButton
+import com.intellij.testFramework.LightVirtualFile
+import java.util.concurrent.CompletableFuture
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.ui.EditorTextField
-import com.intellij.ui.InplaceButton
-import com.intellij.openapi.ui.popup.IconButton
 import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBLabel
@@ -60,10 +63,8 @@ import javax.swing.JPanel
 class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWindowPanel(true, true) {
     private val session = ReplSession.getInstance(project)
 
-    // C# lexer highlighting from Rider's frontend file type (com.jetbrains.rider.languages.fileTypes.csharp.CSharpFileType),
-    // looked up by extension so there is no compile dependency on the Rider module.
     private val csharp = FileTypeManager.getInstance().getFileTypeByExtension("cs")
-    private val syntax = SyntaxHighlighterFactory.getSyntaxHighlighter(csharp, project, null) ?: PlainSyntaxHighlighter()
+    private val syntax = csharpHighlighter(project)
 
     private val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
         UndoUtil.disableUndoFor(document)
@@ -80,6 +81,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         }
     }
     private var rendered = 0
+    private var renderedResets = 0
     private var shownVariables: List<Var>? = null
 
     val input: EditorTextField = object : EditorTextField(EditorFactory.getInstance().createDocument(""), project, csharp, false, false) {
@@ -91,7 +93,6 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         }
     }.apply { setFontInheritedFromLAF(false) }
     private val inputHistory = InputHistory { session.history.filter { it.status != "note" }.map { it.code } }
-    private var analyzing = false
 
     private val pendingText = JBTextArea().apply {
         isEditable = false
@@ -103,7 +104,8 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         border = JBUI.Borders.compound(JBUI.Borders.customLine(JBColor(0xE0A43A, 0xE0A43A), 0, 3, 0, 0), JBUI.Borders.empty(4, 8))
         add(JBLabel("Will run on next complete command:").apply { foreground = JBColor(0x8A6D1F, 0xD6B26E) }, BorderLayout.NORTH)
         add(pendingText, BorderLayout.CENTER)
-        add(InplaceButton(IconButton("Clear pending code", AllIcons.Actions.Close, AllIcons.Actions.CloseHovered)) { session.clearPending() }, BorderLayout.EAST)
+        val clear = ActionManager.getInstance().getAction("CSharpRepl.ClearPending")
+        add(ActionButton(clear, clear.templatePresentation.clone(), "CSharpReplPending", ActionToolbar.NAVBAR_MINIMUM_BUTTON_SIZE), BorderLayout.EAST)
         isVisible = false
     }
     private val hint = JBLabel().apply {
@@ -131,11 +133,12 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         val group = ActionManager.getInstance().getAction("CSharpRepl.Toolbar") as ActionGroup
         toolbar = ActionManager.getInstance().createActionToolbar("CSharpReplToolbar", group, true).also { it.targetComponent = this }.component
 
-        onInput("ENTER") { enter(false) }
-        onInput("shift ENTER") { enter(true) }
-        onInput("ESCAPE", { input.text.isNotEmpty() }) { clearInput() }
-        onInput("UP", { caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
-        onInput("DOWN", { caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
+        // Registered on the input component, so they win over the editor's own Enter/Escape (keymap shortcuts if the user set any, else the defaults).
+        bindOnInput("CSharpRepl.Enter", "ENTER")
+        bindOnInput("CSharpRepl.ShiftEnter", "shift ENTER")
+        bindOnInput("CSharpRepl.ClearInput", "ESCAPE")
+        onInput("UP", { !session.analyzing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
+        onInput("DOWN", { !session.analyzing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
 
         Disposer.register(parent) { EditorFactory.getInstance().releaseEditor(history) }
         ApplicationManager.getApplication().messageBus.connect(parent).subscribe(ReplSettings.TOPIC, ReplSettingsListener { applySettings() })
@@ -147,29 +150,35 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     /** The toolbar's Run: pending + input now, as is (Shift+Enter in manual mode). */
     fun runNow() {
+        if (session.analyzing) return
         val code = combine(session.pending, input.text)
         clearInput()
         session.submit(code)
     }
 
-    private fun enter(shift: Boolean) {
+    /** Enter / Shift+Enter in the input ([ReplSession.enter] decides). */
+    fun enter(shift: Boolean) {
         val text = input.text
-        if (analyzing || (!shift && text.isBlank())) return
-        analyzing = true
+        if (session.analyzing || (!shift && text.isBlank())) return
         val editor = input.editor as? EditorEx
         editor?.isViewer = true // the host answers `analyze` in milliseconds; keystrokes in between must not edit text that is about to run
-        session.enter(shift, text).whenComplete { action, _ -> // completes on the EDT
-            analyzing = false
+        var future: CompletableFuture<EnterAction?>? = null
+        try {
+            future = session.enter(shift, text)
+        } finally {
+            if (future == null) editor?.isViewer = false
+        }
+        future.whenComplete { action, _ -> // completes on the EDT
             editor?.isViewer = false
             when (action) {
                 is EnterAction.Run, is EnterAction.ToPending -> clearInput()
                 EnterAction.NewLine -> editor?.let { WriteCommandAction.runWriteCommandAction(project) { EditorModificationUtil.insertStringAtCaret(it, "\n") } }
-                null -> {}
+                null -> {} // stale or failed: nothing ran, the input stays as typed
             }
         }
     }
 
-    private fun clearInput() {
+    fun clearInput() {
         input.text = ""
         inputHistory.reset()
     }
@@ -183,6 +192,12 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private fun lastLine() = maxOf(0, input.document.lineCount - 1)
 
+    private fun bindOnInput(actionId: String, defaultKeys: String) {
+        val action = ActionManager.getInstance().getAction(actionId)
+        val keymap = KeymapUtil.getActiveKeymapShortcuts(actionId)
+        action.registerCustomShortcutSet(if (keymap.shortcuts.isNotEmpty()) keymap else CustomShortcutSet.fromString(defaultKeys), input)
+    }
+
     private fun onInput(keys: String, enabled: () -> Boolean = { true }, run: () -> Unit) =
         object : DumbAwareAction() {
             override fun getActionUpdateThread() = ActionUpdateThread.EDT
@@ -191,19 +206,27 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         }.registerCustomShortcutSet(CustomShortcutSet.fromString(keys), input)
 
     private fun applySettings() {
-        val s = ReplSettings.state
-        splitter.orientation = s.variablesPosition == VariablesPosition.BELOW
-        hint.text = if (s.autoRun) "Enter: run (adds missing ;) · Shift+Enter: new line"
-        else "Enter: new line until the command is complete · Shift+Enter: run now"
+        splitter.orientation = ReplSettings.state.variablesPosition == VariablesPosition.BELOW
+        updateHint()
+    }
+
+    private fun updateHint() {
+        hint.text = when {
+            session.analyzing -> "Analyzing…"
+            ReplSettings.state.autoRun -> "Enter: run (adds missing ;) · Shift+Enter: new line"
+            else -> "Enter: new line until the command is complete · Shift+Enter: run now"
+        }
     }
 
     /** Brings the view up to date with the session: appends new history entries (all of it after a reset). */
     private fun sync() {
         val entries = session.history
-        if (entries.size < rendered) {
+        if (session.resets != renderedResets) {
+            renderedResets = session.resets
             history.markupModel.removeAllHighlighters()
             runWriteAction { history.document.setText("") }
             rendered = 0
+            inputHistory.reset()
         }
         if (entries.size > rendered) {
             runWriteAction { entries.subList(rendered, entries.size).forEach(::render) }
@@ -217,7 +240,8 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             shownVariables = session.variables
             variables.show(session.variables)
         }
-        ActivityTracker.getInstance().inc() // Run ↔ Stop
+        updateHint()
+        ActivityTracker.getInstance().inc() // Run ↔ Stop, enablement while analyzing
     }
 
     private fun render(e: HistoryEntry) {
@@ -264,6 +288,20 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     }
 
     companion object {
+        /**
+         * C# lexer highlighting from Rider's frontend file type (com.jetbrains.rider.languages.fileTypes.csharp.CSharpFileType),
+         * looked up by extension so there is no compile dependency on the Rider module. Fallback: the TextMate C# bundle when
+         * the TextMate plugin is installed (looked up by name, so that dependency stays optional too), else plain text.
+         */
+        fun csharpHighlighter(project: Project): SyntaxHighlighter {
+            val types = FileTypeManager.getInstance()
+            SyntaxHighlighterFactory.getSyntaxHighlighter(types.getFileTypeByExtension("cs"), project, null)
+                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
+            types.findFileTypeByName("textmate")?.let { tm -> SyntaxHighlighterFactory.getSyntaxHighlighter(tm, project, LightVirtualFile("repl.cs")) }
+                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
+            return PlainSyntaxHighlighter()
+        }
+
         fun of(project: Project): ReplPanel? =
             ToolWindowManager.getInstance(project).getToolWindow(ReplToolWindowFactory.ID)?.contentManager?.getContent(0)?.component as? ReplPanel
     }

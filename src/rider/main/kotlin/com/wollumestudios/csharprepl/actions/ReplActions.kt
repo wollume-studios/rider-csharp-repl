@@ -18,7 +18,7 @@ class RunAction : DumbAwareAction("Run", "Run the pending code and the input now
     override fun getActionUpdateThread() = ActionUpdateThread.EDT
     override fun update(e: AnActionEvent) {
         e.presentation.isVisible = e.session?.running != true
-        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null
+        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null && e.session?.analyzing != true
     }
     override fun actionPerformed(e: AnActionEvent) {
         ReplPanel.of(e.project ?: return)?.runNow()
@@ -59,7 +59,7 @@ class ResetAction : DumbAwareAction("Reset", "Restart the session: clears histor
 class ClearPendingAction : DumbAwareAction("Clear Pending Code", "Discard the code waiting for a complete command", AllIcons.Actions.Close) {
     override fun getActionUpdateThread() = ActionUpdateThread.EDT
     override fun update(e: AnActionEvent) {
-        e.presentation.isEnabled = e.session?.pending?.isNotEmpty() == true
+        e.presentation.isEnabled = e.session?.let { it.pending.isNotEmpty() && !it.analyzing } == true
     }
     override fun actionPerformed(e: AnActionEvent) {
         e.session?.clearPending()
@@ -70,4 +70,37 @@ class SettingsAction : DumbAwareAction("C# REPL Settings…", "Settings › Tool
     override fun getActionUpdateThread() = ActionUpdateThread.BGT
     override fun actionPerformed(e: AnActionEvent) =
         ShowSettingsUtil.getInstance().showSettingsDialog(e.project, ReplConfigurable::class.java)
+}
+
+/** Enter in the input (bound on the input component; see ReplPanel). Auto-run: run, adding a missing ;. Manual: collect until complete. */
+class EnterKeyAction : InputAction("Enter in C# REPL", "Run the input or continue it, depending on the auto-run mode") {
+    override fun actionPerformed(e: AnActionEvent) {
+        ReplPanel.of(e.project ?: return)?.enter(shift = false)
+    }
+}
+
+/** Shift+Enter in the input. Auto-run: new line. Manual: run pending code and the input now. */
+class ShiftEnterKeyAction : InputAction("Shift+Enter in C# REPL", "New line (auto-run) or run now (manual)") {
+    override fun actionPerformed(e: AnActionEvent) {
+        ReplPanel.of(e.project ?: return)?.enter(shift = true)
+    }
+}
+
+/** Escape in the input: clears it. */
+class ClearInputAction : InputAction("Clear C# REPL Input", "Clear the input field") {
+    override fun update(e: AnActionEvent) {
+        super.update(e)
+        if (e.presentation.isEnabled) e.presentation.isEnabled = ReplPanel.of(e.project!!)?.input?.text?.isNotEmpty() == true
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReplPanel.of(e.project ?: return)?.clearInput()
+    }
+}
+
+/** Enabled while the tool window exists and no Enter is waiting for `analyze`. */
+abstract class InputAction(text: String, description: String) : DumbAwareAction(text, description, null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null && e.session?.analyzing != true
+    }
 }
