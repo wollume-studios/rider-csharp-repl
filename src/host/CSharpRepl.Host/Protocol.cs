@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace CSharpRepl.Host;
 
-public sealed record Request(int Id, string Cmd, string? Code, int? Handle = null, string? Kind = null, string? Path = null, string? Name = null, string? Version = null, string? FilePath = null);
+public sealed record Request(int Id, string Cmd, string? Code, int? Handle = null, string? Kind = null, string? Path = null, string? Name = null, string? Version = null, string? FilePath = null, bool? ExcludeThrown = null);
 
 public sealed record AnalyzeResponse(bool Complete, string? Fixed);
 
@@ -18,6 +18,8 @@ public sealed record AddReferenceResponse(string[] Assemblies, string[] SourceDi
 public sealed record DumpResponse(string Text, string[] NotReproducible);
 
 public sealed record RestoreScriptResponse(string Code, string[] NotReproducible);
+
+public sealed record ExportResponse(string Text);
 
 /// <summary>One JSON object per line; writes are serialized so concurrent handlers never interleave.</summary>
 public sealed class ProtocolWriter(Stream output)

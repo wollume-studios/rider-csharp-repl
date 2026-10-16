@@ -42,9 +42,10 @@ public class GeneratedCodeCompileTests
         ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator).Select(f => (MetadataReference)MetadataReference.CreateFromFile(f)).ToArray();
 
     /// <summary>Compiles the code as a file-based app's top-level program (usings as the SDK's implicit ones) and returns the errors.</summary>
-    private static string[] Errors(string code)
+    internal static string[] Errors(string code)
     {
-        var source = "using System; using System.Collections.Generic; using System.IO; using System.Linq; using System.Threading.Tasks;\n"
+        // The SDK's implicit usings (System.Text is deliberately not among them).
+        var source = "using System; using System.Collections.Generic; using System.IO; using System.Linq; using System.Net.Http; using System.Threading; using System.Threading.Tasks;\n"
             + string.Join("\n", code.Split('\n').Where(l => !l.StartsWith("#!") && !l.StartsWith("#:")));
         return CSharpCompilation.Create("t", [CSharpSyntaxTree.ParseText(source)], References, new CSharpCompilationOptions(OutputKind.ConsoleApplication))
             .GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.ToString()).ToArray();

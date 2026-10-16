@@ -160,4 +160,21 @@ public class ProtocolLoopTests
         Assert.Equal("unknown command: x", unknown.GetProperty("error").GetString());
         await s.Finish();
     }
+
+    [Fact]
+    public async Task Loop_Export_RunsAfterQueuedRunsAndHonorsExcludeThrown()
+    {
+        using var s = new Session();
+        await s.Send(new { id = 1, cmd = "run", code = "var x = 1;" });
+        await s.Send(new { id = 2, cmd = "run", code = "throw new Exception(\"boom\");" });
+        await s.Send(new { id = 3, cmd = "export", filePath = Path.Combine(Path.GetTempPath(), "app.cs"), excludeThrown = true });
+        await s.Receive();
+        await s.Receive();
+        var export = await s.Receive();
+        Assert.True(export.GetProperty("ok").GetBoolean(), export.ToString());
+        var text = export.GetProperty("text").GetString()!;
+        Assert.Contains("var x = 1;", text);
+        Assert.DoesNotContain("boom", text);
+        await s.Finish();
+    }
 }

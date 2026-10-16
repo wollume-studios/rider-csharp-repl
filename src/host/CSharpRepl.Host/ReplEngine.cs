@@ -44,9 +44,11 @@ public sealed partial class ReplEngine
     };
 
     // Default references: the shared framework's own assemblies (the scripting default set is too small on .NET Core).
-    private ScriptOptions _options = ScriptOptions.Default
+    internal static readonly ScriptOptions BaseOptions = ScriptOptions.Default
         .WithReferences(FrameworkFiles.Select(f => MetadataReference.CreateFromFile(f)))
-        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
+        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
+
+    private ScriptOptions _options = BaseOptions;
 
     private readonly List<ReferenceInfo> _references = new();
 
@@ -214,6 +216,9 @@ public sealed partial class ReplEngine
         }
         return (lines, bad.ToArray());
     }
+
+    public string Export(string filePath, bool excludeThrown) =>
+        SessionExporter.Export(Submissions, excludeThrown, Directives.For(References, filePath), _options);
 
     public IReadOnlyList<VarInfo> Expand(int handle)
     {

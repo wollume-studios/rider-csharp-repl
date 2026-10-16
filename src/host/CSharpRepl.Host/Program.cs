@@ -20,7 +20,7 @@ public static class Program
 
     public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
 
-    /// <summary>Reads requests until EOF. `run`, `variables`, `expand`, `dump`, `restoreScript` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
+    /// <summary>Reads requests until EOF. `run`, `variables`, `expand`, `dump`, `restoreScript`, `export` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` is answered immediately.</summary>
     public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine)
     {
         var writer = new ProtocolWriter(output);
@@ -39,7 +39,7 @@ public static class Program
             catch (JsonException e) { writer.Error(0, "invalid request: " + e.Message); continue; }
             if (request == null) { writer.Error(0, "invalid request"); continue; }
 
-            if (request.Cmd is "run" or "variables" or "expand" or "addReference" or "dump" or "restoreScript") await runs.Writer.WriteAsync(request);
+            if (request.Cmd is "run" or "variables" or "expand" or "addReference" or "dump" or "restoreScript" or "export") await runs.Writer.WriteAsync(request);
             else await Handle(request, writer, engine);
         }
 
@@ -77,6 +77,9 @@ public static class Program
                 case "restoreScript":
                     var (code, restoreBad) = engine.RestoreScript();
                     writer.Ok(request.Id, new RestoreScriptResponse(code, restoreBad));
+                    break;
+                case "export":
+                    writer.Ok(request.Id, new ExportResponse(engine.Export(request.FilePath ?? throw new ArgumentException("filePath required"), request.ExcludeThrown ?? false)));
                     break;
                 default:
                     writer.Error(request.Id, "unknown command: " + request.Cmd);
