@@ -30,13 +30,14 @@ import com.wollumestudios.csharprepl.refs.WatchedProject
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import java.io.File
 import java.io.IOException
+import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * One history item. [status] is the host's "ok" / "threw" / "compileError", or "running" (sent, no answer yet: the
  * entry is replaced in place when the answer comes), "error" (the host failed the run), "stopped" (killed by Stop or a
- * restart), "note" (a session message in [output], no code).
+ * restart), "note" (a session message in [output], no code). [restore]: the restore script, not a user command.
  */
 data class HistoryEntry(
     val code: String,
@@ -45,6 +46,7 @@ data class HistoryEntry(
     val result: String? = null,
     val diagnostics: List<String> = emptyList(),
     val exception: String? = null,
+    val restore: Boolean = false,
 ) {
     companion object {
         fun note(text: String) = HistoryEntry("", "note", text)
@@ -75,6 +77,8 @@ class ReplSession(private val project: Project) : Disposable {
 
     private val entries = mutableListOf<HistoryEntry>()
     val history: List<HistoryEntry> get() = entries
+    /** Index in [history] where the current host's session starts: Replay re-runs only what that host ran. */
+    private var sessionStart = 0
     /** Bumped by [reset]: the view clears its history display when it changes. */
     var resets = 0
         private set
@@ -162,21 +166,25 @@ class ReplSession(private val project: Project) : Disposable {
      * Runs [code] as is: it enters the history right away as a "running" entry (nothing runs unseen), which is replaced
      * in place by the answer; then the variables are refreshed. Clears pending.
      */
-    fun submit(code: String) {
+    fun submit(code: String, restore: Boolean = false) {
         if (code.isBlank()) return
         start()
         setPending("")
         val gen = generation
-        if (host == null) { append(HistoryEntry(code, "error", exception = "No host process")); return }
-        val running = HistoryEntry(code, "running")
+        if (host == null) { append(HistoryEntry(code, "error", exception = "No host process", restore = restore)); return }
+        val running = HistoryEntry(code, "running", restore = restore)
         inFlight += running
         append(running)
         request("run", mapOf("code" to code)).whenComplete { json, error ->
             onEdt {
                 if (gen != generation) return@onEdt // stopped or restarted: the entry was already marked
                 inFlight.removeIf { it === running }
-                val done = if (json != null) gson.fromJson(json, RunResponse::class.java).let { r -> HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception) }
-                else HistoryEntry(code, "error", exception = (error?.cause ?: error)?.message ?: "run failed")
+                val done = if (json != null) gson.fromJson(json, RunResponse::class.java).let { r ->
+                    // `#r "nuget: ..."` typed in code: later hosts re-add it and the gear lists it, as if added through the UI
+                    r.addedReferences.orEmpty().forEach { if (it !in references) references += it }
+                    HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception, restore)
+                }
+                else HistoryEntry(code, "error", exception = (error?.cause ?: error)?.message ?: "run failed", restore = restore)
                 replace(running, done)
                 refreshVariables()
             }
@@ -219,6 +227,12 @@ class ReplSession(private val project: Project) : Disposable {
         append(HistoryEntry.note("Stopped — session restarted, variables lost"))
     }
 
+    /** Banner / action Rebuild: a fresh host rebuilds the references; variables are cleared, the history stays. */
+    fun rebuild() {
+        restart(RestartMode.Empty)
+        append(HistoryEntry.note("Rebuilt references — session restarted, variables cleared"))
+    }
+
     /** A fresh session: history, pending code and variables cleared, references kept. */
     fun reset() {
         entries.clear()
@@ -229,14 +243,14 @@ class ReplSession(private val project: Project) : Disposable {
     }
 
     /**
-     * Replaces the host, re-adding [references]. [RestartMode.Replay] re-runs the history's successful commands;
+     * Replaces the host, re-adding [references]. [RestartMode.Replay] re-runs the successful commands the current host ran;
      * [RestartMode.Restore] runs the old host's restore script (type declarations and variables as code). Both run visibly.
      */
     fun restart(mode: RestartMode) {
         when (mode) {
             RestartMode.Empty -> replaceHost()
             RestartMode.Replay -> {
-                val ok = history.filter { it.status == "ok" }.map { it.code }
+                val ok = replayCommands(history, sessionStart)
                 replaceHost()
                 append(HistoryEntry.note("Session restarted, replaying ${ok.size} command(s)"))
                 ok.forEach(::submit)
@@ -251,7 +265,7 @@ class ReplSession(private val project: Project) : Disposable {
                         if (json == null) { append(HistoryEntry.note("Session restarted; variables could not be restored: ${(error?.cause ?: error)?.message}")); return@onEdt }
                         val r = gson.fromJson(json, RestoreScriptResponse::class.java)
                         append(HistoryEntry.note("Session restarted, running the restore script"))
-                        submit(r.code) // shown in the history as it runs
+                        submit(r.code, restore = true) // shown in the history as it runs
                         if (!r.notReproducible.isNullOrEmpty()) notify(project, "Not restored: ${r.notReproducible.joinToString()}", NotificationType.WARNING)
                     }
                 }
@@ -333,11 +347,13 @@ class ReplSession(private val project: Project) : Disposable {
 
     private fun startHost() {
         val gen = generation
+        sessionStart = entries.size // what the history shows so far never ran in this host (0 after a reset)
         host = try {
-            HostProcess(HostLocator.hostDll(), onExit = { code, killed -> if (!killed) onEdt { hostExited(gen, code) } }, log = LOG::info)
+            HostProcess(HostLocator.hostDll(), onExit = { code, killed -> if (!killed) onEdt { hostExited(gen, code) } }, log = LOG::info,
+                workingDir = project.basePath?.let { Paths.get(it) })
         } catch (e: IOException) {
             LOG.warn(e)
-            val note = HistoryEntry.note("dotnet not found on PATH — install the .NET 8+ SDK")
+            val note = HistoryEntry.note("dotnet not found (PATH, DOTNET_ROOT, default install locations) — install the .NET 8+ SDK")
             if (history.lastOrNull() != note) append(note)
             null
         } ?: return

@@ -32,6 +32,13 @@ data class EnterSnapshot(val pending: String, val generation: Int, val resets: I
 /** The answer is dropped (nothing runs) when pending code was cleared or changed, or the session restarted or reset meanwhile. */
 fun isStale(atKey: EnterSnapshot, now: EnterSnapshot) = atKey != now
 
+/**
+ * Rebuild & replay: the successful user commands of the current host's session, which starts at [sessionStart] in
+ * [history]. Earlier hosts' commands live on in the replays that followed them; the restore script is not a user command.
+ */
+fun replayCommands(history: List<HistoryEntry>, sessionStart: Int): List<String> =
+    history.drop(sessionStart).filter { it.status == "ok" && !it.restore }.map { it.code }
+
 /** Up/Down through submitted commands ([entries], oldest first); the text being edited comes back after the newest. */
 class InputHistory(private val entries: () -> List<String>) {
     private var index = -1 // steps back from the newest; -1 = the draft

@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.BufferedWriter
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
@@ -14,14 +15,25 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * The `dotnet CSharpRepl.Host.dll` child process: one JSON object per line over stdin/stdout (UTF-8).
  * [onExit] (exit code, whether kill()/close() was called) is called once, from a background thread, after every pending request was failed. No IntelliJ classes, so it runs in plain unit tests.
+ * [workingDir]: the host's current directory (relative file IO, the solution's global.json for builds); null inherits the IDE's.
+ * [dotnet]: the executable, also handed to the host (CSHARPREPL_DOTNET) for its builds; throws an [IOException] when none was found.
  */
-class HostProcess(hostDll: Path, private val onExit: (code: Int, killed: Boolean) -> Unit, private val log: (String) -> Unit = {}) : AutoCloseable {
+class HostProcess(
+    hostDll: Path,
+    private val onExit: (code: Int, killed: Boolean) -> Unit,
+    private val log: (String) -> Unit = {},
+    workingDir: Path? = null,
+    dotnet: Path = DotnetLocator.dotnet ?: throw IOException("dotnet not found"),
+) : AutoCloseable {
     private val gson = Gson()
     private val ids = AtomicInteger()
     private val pending = ConcurrentHashMap<Int, CompletableFuture<JsonObject>>()
     @Volatile private var exited = false
     @Volatile private var killedByUs = false
-    private val process: Process = ProcessBuilder("dotnet", hostDll.toString()).start()
+    private val process: Process = ProcessBuilder(dotnet.toString(), hostDll.toString())
+        .directory(workingDir?.toFile())
+        .apply { environment()["CSHARPREPL_DOTNET"] = dotnet.toString() }
+        .start()
     private val stdin = BufferedWriter(OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8))
 
     init {

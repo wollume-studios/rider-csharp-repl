@@ -34,6 +34,7 @@ import java.io.File
 import com.wollumestudios.csharprepl.ui.ReplToolWindowFactory
 import com.wollumestudios.csharprepl.settings.ReplConfigurable
 import com.wollumestudios.csharprepl.settings.ReplSettings
+import com.wollumestudios.csharprepl.settings.VariablesPosition
 import com.wollumestudios.csharprepl.ui.ReplPanel
 
 private val AnActionEvent.session get() = project?.let(ReplSession::getInstance)
@@ -214,7 +215,7 @@ abstract class SessionAction(text: String, description: String, private val run:
     }
 }
 
-class RebuildAction : SessionAction("Rebuild References and Restart", "Rebuild the referenced projects; empty session, references kept", { it.restart(RestartMode.Empty) })
+class RebuildAction : SessionAction("Rebuild References and Restart", "Rebuild the referenced projects; empty session, references kept", { it.rebuild() })
 class RebuildReplayAction : SessionAction("Rebuild References and Replay", "Rebuild, restart, then rerun the successful commands in order", { it.restart(RestartMode.Replay) })
 class RebuildRestoreAction : SessionAction("Rebuild References and Restore Variables", "Rebuild, restart, then run the session's type declarations and variables as code (visibly)", { it.restart(RestartMode.Restore) })
 class IgnoreChangeAction : SessionAction("Ignore Referenced Project Change", "Hide the banner until the next change", { it.dismissChange() })
@@ -228,6 +229,16 @@ class IgnoreChangesForeverAction : DumbAwareToggleAction("Ignore Referenced Proj
         ReplSettings.state.ignoreChangesForever = state
         ReplSettings.changed()
         if (state) e.project?.serviceIfCreated<ReplSession>()?.dismissChange()
+    }
+}
+
+/** ⚙ menu: the variables table below the input instead of right of the history (same as the settings page). */
+class ToggleVariablesBelowAction : DumbAwareToggleAction("Variables Below Input", "Show the variables table below the input instead of right of the history", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun isSelected(e: AnActionEvent) = ReplSettings.state.variablesPosition == VariablesPosition.BELOW
+    override fun setSelected(e: AnActionEvent, state: Boolean) {
+        ReplSettings.state.variablesPosition = if (state) VariablesPosition.BELOW else VariablesPosition.RIGHT
+        ReplSettings.changed()
     }
 }
 

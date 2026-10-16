@@ -32,6 +32,7 @@
         <action id="CSharpRepl.Reset" class="com.wollumestudios.csharprepl.actions.ResetAction"/>
         <action id="CSharpRepl.ClearPending" class="com.wollumestudios.csharprepl.actions.ClearPendingAction"/>
         <action id="CSharpRepl.Settings" class="com.wollumestudios.csharprepl.actions.SettingsAction"/>
+        <action id="CSharpRepl.ToggleVariablesBelow" class="com.wollumestudios.csharprepl.actions.ToggleVariablesBelowAction"/>
         <!-- No keymap shortcuts: ReplPanel binds these on the input only (Enter, Shift+Enter, Escape by default, or what the user assigns in the keymap). -->
         <action id="CSharpRepl.Enter" class="com.wollumestudios.csharprepl.actions.EnterKeyAction"/>
         <action id="CSharpRepl.ShiftEnter" class="com.wollumestudios.csharprepl.actions.ShiftEnterKeyAction"/>
@@ -63,6 +64,7 @@
             <reference ref="CSharpRepl.AddReference"/>
             <reference ref="CSharpRepl.NewSingleFileApp"/>
             <separator/>
+            <reference ref="CSharpRepl.ToggleVariablesBelow"/>
             <reference ref="CSharpRepl.IgnoreChangesForever"/>
             <reference ref="CSharpRepl.Settings"/>
         </group>

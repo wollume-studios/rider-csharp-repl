@@ -3,13 +3,14 @@ package com.wollumestudios.csharprepl.host
 // Mirrors src/host/CSharpRepl.Host/Protocol.cs. Decode a response with Gson: gson.fromJson(json, RunResponse::class.java).
 // Gson leaves absent fields null/0, so a missing list is null at runtime despite the Kotlin type; the host always sends them.
 
-/** `run`: [status] is "ok", "threw" or "compileError". */
+/** `run`: [status] is "ok", "threw" or "compileError"; [addedReferences]: what the run's `#r "nuget: ..."` lines added. */
 data class RunResponse(
     val status: String,
     val output: String,
     val result: String?,
     val diagnostics: List<String>,
     val exception: String?,
+    val addedReferences: List<ReferenceInfo>,
 )
 
 /** [handle] is non-null when the value has children (`expand`). */

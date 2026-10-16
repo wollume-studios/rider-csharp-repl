@@ -68,7 +68,7 @@ class ReplSmokeUiTest {
         val variables = panel.x(JTableUiComponent::class.java) { byType("com.intellij.ui.treeStructure.treetable.TreeTable") }
         // The first host start and Roslyn's warmup take a few seconds.
         waitFor("r | 0 | int in the variables table", timeout = 2.minutes) {
-            variables.content().values.any { row -> row.values.toList().let { it.size >= 3 && it.takeLast(2) == listOf("0", "int") && it[0].contains("r") } }
+            variables.content().values.any { row -> row.values.toList().let { it.size >= 3 && it.takeLast(2) == listOf("0", "int") && nameCell(it[0]) == "r" } }
                 .also { if (!it) println("variables: ${variables.content()}; history: ${session.historyText()}") }
         }
 
@@ -102,6 +102,9 @@ class ReplSmokeUiTest {
         driver.withWriteAction { panel.getInput().setText(code) }
         driver.invokeAction("CSharpRepl.Enter", component = component)
     }
+
+    /** The Name cell's text without the tree's expander (anything before the name, e.g. an arrow or +/-). */
+    private fun nameCell(text: String) = text.trim().replace(Regex("""^[^\p{L}\p{N}_$]+"""), "").trim()
 
     private fun ReplSession.historyText() =
         getHistory().joinToString("\n") { "[${it.getStatus()}] ${it.getCode()} ${it.getOutput()} ${it.getResult() ?: ""} ${it.getException() ?: ""}" }

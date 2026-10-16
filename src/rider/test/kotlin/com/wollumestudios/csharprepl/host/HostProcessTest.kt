@@ -1,6 +1,8 @@
 package com.wollumestudios.csharprepl.host
 
+import com.google.gson.Gson
 import com.google.gson.JsonObject
+import java.nio.file.Files
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -32,6 +34,18 @@ class HostProcessTest {
             val vars = host.request("variables", emptyMap()).get(10, TimeUnit.SECONDS)
             val names = vars.getAsJsonArray("variables").map { (it as JsonObject).get("name").asString }
             assertTrue("r" in names, "variables: $names")
+        }
+    }
+
+    @Test
+    fun `the host runs in the working directory with the located dotnet and answers runs with addedReferences`() {
+        val dir = Files.createTempDirectory("csharprepl-wd").toRealPath()
+        HostProcess(HostLocator.hostDll(), onExit = { _, _ -> }, workingDir = dir).use { host ->
+            // Forward slashes: the result is shown as a C# string literal, where backslashes would be escaped.
+            val code = "(System.IO.Directory.GetCurrentDirectory() + \"|\" + Environment.GetEnvironmentVariable(\"CSHARPREPL_DOTNET\")).Replace('\\\\', '/')"
+            val response = Gson().fromJson(host.request("run", mapOf("code" to code)).get(60, TimeUnit.SECONDS), RunResponse::class.java)
+            assertEquals("\"$dir|${DotnetLocator.dotnet}\"".replace('\\', '/'), response.result)
+            assertEquals(emptyList<ReferenceInfo>(), response.addedReferences)
         }
     }
 
