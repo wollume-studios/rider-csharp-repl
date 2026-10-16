@@ -20,11 +20,18 @@ public class ProtocolLoopTests
         {
             _requests = new StreamWriter(_inServer, Utf8) { AutoFlush = true, NewLine = "\n" };
             _responses = new StreamReader(new AnonymousPipeClientStream(PipeDirection.In, _outServer.ClientSafePipeHandle), Utf8);
-            var input = new StreamReader(new AnonymousPipeClientStream(PipeDirection.In, _inServer.ClientSafePipeHandle), Utf8);
+            var input = Program.CreateInputReader(new AnonymousPipeClientStream(PipeDirection.In, _inServer.ClientSafePipeHandle));
             Loop = Task.Run(() => Program.RunLoop(input, _outServer, new ReplEngine()));
         }
 
         public Task Send(object request) => _requests.WriteLineAsync(JsonSerializer.Serialize(request));
+
+        /// <summary>Writes one request line as raw UTF-8 bytes with non-ASCII characters left unescaped.</summary>
+        public async Task SendRawUtf8(object request)
+        {
+            var json = JsonSerializer.Serialize(request, ProtocolWriter.Json);
+            await _inServer.WriteAsync(Utf8.GetBytes(json + "\n"));
+        }
 
         public async Task<JsonElement> Receive()
         {
@@ -76,6 +83,48 @@ public class ProtocolLoopTests
         var v = Assert.Single((await s.Receive()).GetProperty("variables").EnumerateArray());
         Assert.Equal("s", v.GetProperty("name").GetString());
         Assert.Equal("\"ä\\\"\\n😀\"", v.GetProperty("value").GetString());
+        await s.Finish();
+    }
+
+    [Fact]
+    public async Task Loop_RawUtf8Bytes_RoundTrip()
+    {
+        using var s = new Session();
+        await s.SendRawUtf8(new { id = 1, cmd = "run", code = "var s = \"ä😀\"; s" });
+        var run = await s.Receive();
+        Assert.Equal("ok", run.GetProperty("status").GetString());
+        Assert.Equal("\"ä😀\"", run.GetProperty("result").GetString());
+
+        await s.SendRawUtf8(new { id = 2, cmd = "variables" });
+        var v = Assert.Single((await s.Receive()).GetProperty("variables").EnumerateArray());
+        Assert.Equal("\"ä😀\"", v.GetProperty("value").GetString());
+        await s.Finish();
+    }
+
+    [Fact]
+    public async Task Loop_VariablesAndExpand_WaitForRunningSubmission()
+    {
+        using var s = new Session();
+        await s.Send(new { id = 1, cmd = "run", code = "var list = new List<int> { 5 }; System.Threading.Thread.Sleep(1500);" });
+        await s.Send(new { id = 2, cmd = "variables" });
+        await s.Send(new { id = 3, cmd = "analyze", code = "1" });
+
+        Assert.Equal(3, (await s.Receive()).GetProperty("id").GetInt32()); // analyze stays inline
+        Assert.Equal(1, (await s.Receive()).GetProperty("id").GetInt32());
+        var variables = await s.Receive();
+        Assert.Equal(2, variables.GetProperty("id").GetInt32());
+        var handle = variables.GetProperty("variables")[0].GetProperty("handle").GetInt32();
+
+        await s.Send(new { id = 4, cmd = "expand", handle });
+        var expand = await s.Receive();
+        Assert.True(expand.GetProperty("ok").GetBoolean());
+        var child = Assert.Single(expand.GetProperty("children").EnumerateArray());
+        Assert.Equal("[0]", child.GetProperty("name").GetString());
+        Assert.Equal("5", child.GetProperty("value").GetString());
+        Assert.Equal(JsonValueKind.Null, child.GetProperty("handle").ValueKind);
+
+        await s.Send(new { id = 5, cmd = "expand", handle = 9999 });
+        Assert.False((await s.Receive()).GetProperty("ok").GetBoolean());
         await s.Finish();
     }
 

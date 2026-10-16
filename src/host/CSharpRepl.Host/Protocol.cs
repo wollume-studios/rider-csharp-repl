@@ -5,11 +5,13 @@ using System.Text.Json.Serialization;
 
 namespace CSharpRepl.Host;
 
-public sealed record Request(int Id, string Cmd, string? Code);
+public sealed record Request(int Id, string Cmd, string? Code, int? Handle = null);
 
 public sealed record AnalyzeResponse(bool Complete, string? Fixed);
 
 public sealed record VariablesResponse(IReadOnlyList<VarInfo> Variables);
+
+public sealed record ExpandResponse(IReadOnlyList<VarInfo> Children);
 
 /// <summary>One JSON object per line; writes are serialized so concurrent handlers never interleave.</summary>
 public sealed class ProtocolWriter(Stream output)

@@ -3,7 +3,6 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
-using Microsoft.CodeAnalysis.CSharp.Scripting.Hosting;
 using Microsoft.CodeAnalysis.Scripting;
 
 namespace CSharpRepl.Host;
@@ -27,6 +26,8 @@ public sealed class ReplEngine
     private readonly List<Submission> _submissions = new();
     private ScriptState<object>? _state;
     private Exception? _lastException;
+    private readonly Dictionary<int, object> _handles = new(); // expandable values from the last variables/expand answers; cleared on every run
+    private int _nextHandle;
 
     private static IEnumerable<MetadataReference> FrameworkReferences() =>
         Directory.EnumerateFiles(RuntimeEnvironment.GetRuntimeDirectory(), "*.dll")
@@ -39,10 +40,12 @@ public sealed class ReplEngine
     public async Task<RunResult> RunAsync(string code)
     {
         await _gate.WaitAsync();
+        lock (_handles) _handles.Clear();
         var (oldOut, oldErr) = (Console.Out, Console.Error);
-        var output = new StringWriter(); // Console.SetOut wraps it in a synchronized writer
-        Console.SetOut(output);
-        Console.SetError(output);
+        var output = new StringWriter();
+        var sync = TextWriter.Synchronized(output); // Out and Error share one lock so interleaved writes stay whole
+        Console.SetOut(sync);
+        Console.SetError(sync);
         try
         {
             ScriptState<object> next;
@@ -54,6 +57,7 @@ public sealed class ReplEngine
             }
             catch (CompilationErrorException e)
             {
+                _lastException = null;
                 Record(code, SubmissionStatus.CompileError);
                 return new RunResult(SubmissionStatus.CompileError, output.ToString(), null,
                     e.Diagnostics.Select(d => d.ToString()).ToArray(), null);
@@ -69,7 +73,7 @@ public sealed class ReplEngine
 
             Record(code, SubmissionStatus.Ok);
             // ponytail: a trailing expression that evaluates to null is indistinguishable from no expression
-            var result = next.ReturnValue is { } v ? CSharpObjectFormatter.Instance.FormatObject(v) : null;
+            var result = next.ReturnValue is { } v ? ValueFormatter.Display(v) : null;
             return new RunResult(SubmissionStatus.Ok, output.ToString(), result, [], null);
         }
         finally
@@ -85,32 +89,30 @@ public sealed class ReplEngine
         var vars = (_state?.Variables ?? ImmutableArray<ScriptVariable>.Empty)
             .GroupBy(v => v.Name)
             .Select(g => g.Last())
-            .Select(v => new VarInfo(v.Name, TypeName(v.Type), CSharpObjectFormatter.Instance.FormatObject(v.Value), null))
+            .Select(v => Describe(v.Name, v.Type, v.Value))
             .ToList();
-        if (_lastException is { } ex)
-            vars.Add(new VarInfo("$exception", TypeName(ex.GetType()), CSharpObjectFormatter.Instance.FormatObject(ex), null));
+        if (_lastException is { } ex) vars.Add(Describe("$exception", ex.GetType(), ex));
         return vars;
+    }
+
+    public IReadOnlyList<VarInfo> Expand(int handle)
+    {
+        object? target;
+        lock (_handles)
+            if (!_handles.TryGetValue(handle, out target)) throw new ArgumentException($"unknown handle {handle}");
+        return ValueFormatter.Children(target).Select(c => Describe(c.Name, c.Type, c.Value)).ToList();
+    }
+
+    private VarInfo Describe(string name, Type type, object? value)
+    {
+        int? handle = null;
+        if (ValueFormatter.HasChildren(value))
+            lock (_handles) { handle = ++_nextHandle; _handles[handle.Value] = value!; }
+        return new VarInfo(name, value is Note ? "" : ValueFormatter.TypeName(type), ValueFormatter.Display(value), handle);
     }
 
     private void Record(string code, SubmissionStatus status)
     {
         lock (_submissions) _submissions.Add(new Submission(code, status));
-    }
-
-    private static readonly Dictionary<Type, string> Aliases = new()
-    {
-        [typeof(bool)] = "bool", [typeof(byte)] = "byte", [typeof(sbyte)] = "sbyte", [typeof(char)] = "char",
-        [typeof(decimal)] = "decimal", [typeof(double)] = "double", [typeof(float)] = "float", [typeof(int)] = "int",
-        [typeof(uint)] = "uint", [typeof(long)] = "long", [typeof(ulong)] = "ulong", [typeof(short)] = "short",
-        [typeof(ushort)] = "ushort", [typeof(object)] = "object", [typeof(string)] = "string", [typeof(void)] = "void",
-    };
-
-    private static string TypeName(Type t)
-    {
-        if (Aliases.TryGetValue(t, out var alias)) return alias;
-        if (t.IsArray) return TypeName(t.GetElementType()!) + "[" + new string(',', t.GetArrayRank() - 1) + "]";
-        if (!t.IsGenericType) return t.Name;
-        var args = string.Join(", ", t.GetGenericArguments().Select(TypeName));
-        return t.GetGenericTypeDefinition() == typeof(Nullable<>) ? args + "?" : $"{t.Name[..t.Name.IndexOf('`')]}<{args}>";
     }
 }

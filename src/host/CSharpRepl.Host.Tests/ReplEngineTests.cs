@@ -64,6 +64,73 @@ public class ReplEngineTests
     }
 
     [Fact]
+    public async Task CompileError_ClearsException()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("throw new System.Exception(\"boom\");");
+        Assert.Contains(engine.GetVariables(), v => v.Name == "$exception");
+        await engine.RunAsync("var = ;");
+        Assert.DoesNotContain(engine.GetVariables(), v => v.Name == "$exception");
+    }
+
+    [Fact]
+    public async Task Variables_HaveHandlesOnlyWhenExpandable()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("var n = 1; var s = \"x\"; var list = new List<int> { 1, 2 }; var o = new { A = 1 };");
+        var vars = engine.GetVariables().ToDictionary(v => v.Name);
+        Assert.Null(vars["n"].Handle);
+        Assert.Null(vars["s"].Handle);
+        Assert.Equal("Count = 2", vars["list"].Value);
+        Assert.NotNull(vars["list"].Handle);
+
+        var items = engine.Expand(vars["list"].Handle!.Value);
+        Assert.Equal(["[0]", "[1]"], items.Select(i => i.Name));
+        Assert.Equal("int", items[0].Type);
+        Assert.Equal("1", items[0].Value);
+        Assert.Null(items[0].Handle);
+
+        var a = Assert.Single(engine.Expand(vars["o"].Handle!.Value));
+        Assert.Equal(("A", "int", "1"), (a.Name, a.Type, a.Value));
+    }
+
+    [Fact]
+    public async Task Expand_NestedAndEllipsisEntry()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("var nested = new List<List<int>> { new() { 1 } }; var big = Enumerable.Range(0, 500).ToList();");
+        var vars = engine.GetVariables().ToDictionary(v => v.Name);
+        var inner = Assert.Single(engine.Expand(vars["nested"].Handle!.Value));
+        Assert.Equal("List<int>", inner.Type);
+        Assert.NotNull(inner.Handle);
+        Assert.Equal("[0]", Assert.Single(engine.Expand(inner.Handle!.Value)).Name);
+
+        var big = engine.Expand(vars["big"].Handle!.Value);
+        Assert.Equal(101, big.Count);
+        Assert.Equal(new VarInfo("…", "", "400 more", null), big[100]);
+    }
+
+    [Fact]
+    public async Task Handles_AreClearedOnRun()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("var list = new List<int> { 1 };");
+        var handle = engine.GetVariables().Single().Handle!.Value;
+        await engine.RunAsync("1");
+        Assert.Throws<ArgumentException>(() => engine.Expand(handle));
+    }
+
+    [Fact]
+    public async Task Exception_VariableIsExpandable()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("throw new System.Exception(\"boom\");");
+        var ex = Assert.Single(engine.GetVariables());
+        Assert.Equal("{Exception: boom}", ex.Value);
+        Assert.Contains(engine.Expand(ex.Handle!.Value), c => c.Name == "Message" && c.Value == "\"boom\"");
+    }
+
+    [Fact]
     public async Task ConsoleOutput_IsCaptured()
     {
         var result = await new ReplEngine().RunAsync("Console.WriteLine(\"hi\");");

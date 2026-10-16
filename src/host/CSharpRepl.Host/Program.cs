@@ -12,11 +12,14 @@ public static class Program
         var protocolOut = Console.OpenStandardOutput();
         Console.SetOut(TextWriter.Null);
         Console.SetError(TextWriter.Null);
-        var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+        Console.SetIn(TextReader.Null); // user Console.ReadLine() must not consume protocol input
+        var input = CreateInputReader(Console.OpenStandardInput());
         await RunLoop(input, protocolOut, new ReplEngine());
     }
 
-    /// <summary>Reads requests until EOF. `run` goes through one sequential queue; every other command is answered immediately.</summary>
+    public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
+
+    /// <summary>Reads requests until EOF. `run`, `variables` and `expand` (which can execute user code) go through one sequential queue; `analyze` is answered immediately.</summary>
     public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine)
     {
         var writer = new ProtocolWriter(output);
@@ -35,7 +38,7 @@ public static class Program
             catch (JsonException e) { writer.Error(0, "invalid request: " + e.Message); continue; }
             if (request == null) { writer.Error(0, "invalid request"); continue; }
 
-            if (request.Cmd == "run") await runs.Writer.WriteAsync(request);
+            if (request.Cmd is "run" or "variables" or "expand") await runs.Writer.WriteAsync(request);
             else await Handle(request, writer, engine);
         }
 
@@ -58,6 +61,9 @@ public static class Program
                     break;
                 case "variables":
                     writer.Ok(request.Id, new VariablesResponse(engine.GetVariables()));
+                    break;
+                case "expand":
+                    writer.Ok(request.Id, new ExpandResponse(engine.Expand(request.Handle ?? throw new ArgumentException("handle required"))));
                     break;
                 default:
                     writer.Error(request.Id, "unknown command: " + request.Cmd);
