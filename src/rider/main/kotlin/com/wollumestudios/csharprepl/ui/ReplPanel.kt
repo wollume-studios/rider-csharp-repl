@@ -30,7 +30,11 @@ import com.intellij.openapi.editor.markup.HighlighterTargetArea
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.PlainSyntaxHighlighter
 import com.intellij.openapi.fileTypes.SyntaxHighlighter
+import com.intellij.openapi.fileTypes.SyntaxHighlighterBase
 import com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
+import com.intellij.lexer.DelegateLexer
+import com.intellij.lexer.Lexer
+import com.intellij.psi.tree.IElementType
 import com.intellij.openapi.keymap.KeymapUtil
 import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.impl.ActionButton
@@ -378,14 +382,37 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
          * C# lexer highlighting from Rider's frontend file type (com.jetbrains.rider.languages.fileTypes.csharp.CSharpFileType),
          * looked up by extension so there is no compile dependency on the Rider module. Fallback: the TextMate C# bundle when
          * the TextMate plugin is installed (looked up by name, so that dependency stays optional too), else plain text.
+         * Rider's lexer leaves contextual keywords (`var`, `await`, …) to the backend, which these editors don't have:
+         * [withContextualKeywords] colors them as keywords.
          */
         fun csharpHighlighter(project: Project): SyntaxHighlighter {
             val types = FileTypeManager.getInstance()
             SyntaxHighlighterFactory.getSyntaxHighlighter(types.getFileTypeByExtension("cs"), project, null)
-                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
+                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return withContextualKeywords(it) }
             types.findFileTypeByName("textmate")?.let { tm -> SyntaxHighlighterFactory.getSyntaxHighlighter(tm, project, LightVirtualFile("repl.cs")) }
                 ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
             return PlainSyntaxHighlighter()
+        }
+
+        /** Contextual keywords that are almost never names in REPL code. */
+        private val CONTEXTUAL = setOf("var", "async", "await", "dynamic", "nameof", "record", "yield", "when", "init", "required", "with", "not", "and", "or", "global")
+
+        /**
+         * [base] with identifiers spelled like a [CONTEXTUAL] keyword lexed as the token type [base] gives `int`. The
+         * identifier and keyword token types are learned by lexing samples, so nothing depends on Rider's token classes.
+         */
+        fun withContextualKeywords(base: SyntaxHighlighter): SyntaxHighlighter {
+            fun typeOf(text: String) = base.highlightingLexer.run { start(text); tokenType }
+            val identifier = typeOf("x") ?: return base
+            val keyword = typeOf("int")?.takeIf { it != identifier && base.getTokenHighlights(it).isNotEmpty() } ?: return base
+            return object : SyntaxHighlighterBase() {
+                override fun getHighlightingLexer(): Lexer = object : DelegateLexer(base.highlightingLexer) {
+                    override fun getTokenType(): IElementType? = super.getTokenType().let {
+                        if (it == identifier && bufferSequence.subSequence(tokenStart, tokenEnd).toString() in CONTEXTUAL) keyword else it
+                    }
+                }
+                override fun getTokenHighlights(tokenType: IElementType): Array<TextAttributesKey> = base.getTokenHighlights(tokenType)
+            }
         }
 
         /**

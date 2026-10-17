@@ -2,6 +2,7 @@ package com.wollumestudios.csharprepl.uitest
 
 import com.intellij.driver.client.Driver
 import com.intellij.driver.client.Remote
+import com.intellij.driver.model.LockSemantics
 import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.openToolWindow
@@ -140,16 +141,16 @@ class ReplSmokeUiTest {
 
         val inputColors = withContext(OnDispatcher.EDT) {
             val default = editor.getColorsScheme().getDefaultForeground().getRGB()
-            val colors = mutableMapOf<Int, String>()
+            val colors = mutableMapOf<String, Int>() // token → non-default foreground
             val it = editor.getHighlighter().createIterator(0)
             while (!it.atEnd()) {
-                it.getTextAttributes()?.getForegroundColor()?.getRGB()?.takeIf { c -> c != default }?.let { c -> colors.putIfAbsent(c, code.substring(it.getStart(), it.getEnd())) }
+                it.getTextAttributes()?.getForegroundColor()?.getRGB()?.takeIf { c -> c != default }?.let { c -> colors[code.substring(it.getStart(), it.getEnd())] = c }
                 it.advance()
             }
             colors
         }
-        println("input colors: ${inputColors.mapKeys { Integer.toHexString(it.key) }}")
-        check(inputColors.size >= 3) { "input: ${inputColors.size} non-default colors for `$code`: $inputColors" }
+        println("input colors: ${inputColors.mapValues { Integer.toHexString(it.value) }}")
+        checkColored("input", code, inputColors)
 
         val historyColors = withContext(OnDispatcher.EDT) {
             val history = panel.getHistory()
@@ -158,11 +159,17 @@ class ReplSmokeUiTest {
             val default = history.getColorsScheme().getDefaultForeground().getRGB()
             history.getMarkupModel().getAllHighlighters()
                 .filter { h -> h.getStartOffset() >= start && h.getEndOffset() <= start + code.length }
-                .mapNotNull { h -> h.getTextAttributes(history.getColorsScheme())?.getForegroundColor()?.getRGB()?.takeIf { c -> c != default }?.let { c -> c to text.substring(h.getStartOffset(), h.getEndOffset()) } }
+                .mapNotNull { h -> h.getTextAttributes(history.getColorsScheme())?.getForegroundColor()?.getRGB()?.takeIf { c -> c != default }?.let { c -> text.substring(h.getStartOffset(), h.getEndOffset()) to c } }
                 .toMap()
         }
-        println("history colors: ${historyColors.mapKeys { Integer.toHexString(it.key) }}")
-        check(historyColors.size >= 3) { "history: ${historyColors.size} non-default colors for `$code`: $historyColors" }
+        println("history colors: ${historyColors.mapValues { Integer.toHexString(it.value) }}")
+        checkColored("history", code, historyColors)
+    }
+
+    /** The keyword `var`, the string and the comment of `var s = "hi"; // c` each have a non-default color, three different ones. */
+    private fun checkColored(where: String, code: String, colors: Map<String, Int>) {
+        val wanted = listOf("var", "\"hi\"", "// c").map { token -> colors[token] ?: fail("$where: `$token` has the default color in `$code`; colored: $colors") }
+        check(wanted.distinct().size == 3) { "$where: keyword, string and comment share colors: $colors" }
     }
 
     /** Runs the action like a keystroke would (update, then perform if enabled); false when it was disabled. */
@@ -212,7 +219,7 @@ class ReplSmokeUiTest {
 
         val app = Path.of(project.getBasePath()!!, "app.cs")
         Files.writeString(app, "#!/usr/bin/env dotnet\n\nConsole.WriteLine(Greeter.Hi(\"app\"));\n")
-        val appEditor = withContext(OnDispatcher.EDT) {
+        val appEditor = withContext(OnDispatcher.EDT, LockSemantics.WRITE_ACTION) { // VFS refresh and opening need the write-intent lock
             val vf = utility(LocalFileSystemRef::class).getInstance().refreshAndFindFileByPath(app.toString().replace('\\', '/')) ?: fail("no VirtualFile for $app")
             utility(FileEditorManagerRef::class).getInstance(project).openFile(vf, true)
             utility(FileEditorManagerRef::class).getInstance(project).getSelectedTextEditor() ?: fail("no editor for $app")
@@ -702,7 +709,7 @@ interface DnDActionRef {
     fun valueOf(name: String): DnDActionRef
 }
 
-@Remote("com.jetbrains.rider.projectView.moveProviders.RiderDragSource")
+@Remote("com.jetbrains.rider.projectView.moveProviders.RiderDragSource", plugin = "com.intellij/intellij.rider") // a product module of the core plugin
 interface RiderDragSourceRef {
     fun startDragging(action: DnDActionRef, point: java.awt.Point): DnDDragStartBeanRef
 }
