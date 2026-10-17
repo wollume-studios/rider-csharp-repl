@@ -50,7 +50,7 @@ public sealed partial class ReplEngine
     // Default references: the shared framework's own assemblies (the scripting default set is too small on .NET Core).
     internal static readonly ScriptOptions BaseOptions = ScriptOptions.Default
         .WithReferences(FrameworkFiles.Select(f => MetadataReference.CreateFromFile(f)))
-        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
+        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
 
     private ScriptOptions _options = BaseOptions;
 
@@ -114,9 +114,11 @@ public sealed partial class ReplEngine
             var added = new List<ReferenceInfo>();
             foreach (Match m in NuGetDirective().Matches(code))
             {
-                try { await AddReferenceAsync("nuget", null, m.Groups[1].Value, m.Groups[2].Value); }
+                var info = new ReferenceInfo("nuget", m.Groups[1].Value, m.Groups[2].Value);
+                if (References.Contains(info)) continue; // already in the session (re-added after a restart, or a replayed #r): no second restore and snapshot
+                try { await AddReferenceAsync("nuget", null, info.PathOrName, info.Version); }
                 catch (ReferenceException e) { return new RunResult(SubmissionStatus.CompileError, "", null, [e.Message], null) { AddedReferences = [.. added] }; }
-                added.Add(new ReferenceInfo("nuget", m.Groups[1].Value, m.Groups[2].Value));
+                added.Add(info);
             }
             code = NuGetDirective().Replace(code, "");
             if (string.IsNullOrWhiteSpace(code)) return new RunResult(SubmissionStatus.Ok, "", null, [], null) { AddedReferences = [.. added] };
