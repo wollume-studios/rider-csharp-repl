@@ -52,7 +52,8 @@ public sealed partial class ReplEngine
         .WithReferences(FrameworkFiles.Select(f => MetadataReference.CreateFromFile(f)))
         .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
 
-    private ScriptOptions _options = BaseOptions;
+    // Volatile: `complete` reads both off the sequential worker, which replaces them.
+    private volatile ScriptOptions _options = BaseOptions;
 
     private readonly List<ReferenceInfo> _references = new();
 
@@ -64,7 +65,7 @@ public sealed partial class ReplEngine
 
     private readonly SemaphoreSlim _gate = new(1, 1); // Console redirection is process-wide: one run at a time
     private readonly List<Submission> _submissions = new();
-    private ScriptState<object>? _state;
+    private volatile ScriptState<object>? _state;
     private Exception? _lastException;
     private readonly Dictionary<int, object> _handles = new(); // expandable values from the last variables/expand answers; cleared on every run
     private int _nextHandle;
@@ -232,6 +233,9 @@ public sealed partial class ReplEngine
 
     public (string Text, string[] Warnings) Export(string filePath, bool excludeThrown) =>
         SessionExporter.Export(Submissions, excludeThrown, Directives.For(References, filePath), _options);
+
+    /// <summary>Completion at [position] in [code] as the next submission. Compiles only (never runs code), so it is safe beside a running submission.</summary>
+    public CompleteResponse Complete(string code, int position) => Completer.Complete(_state, _options, code, position);
 
     public IReadOnlyList<VarInfo> Expand(int handle)
     {

@@ -73,6 +73,29 @@ public class ProtocolLoopTests
     }
 
     [Fact]
+    public async Task Loop_AnswersCompleteWhileRunIsBusy()
+    {
+        using var s = new Session();
+        await s.Send(new { id = 1, cmd = "run", code = "var abc = 1;" });
+        Assert.Equal(1, (await s.Receive()).GetProperty("id").GetInt32());
+        await s.Send(new { id = 2, cmd = "run", code = "System.Threading.Thread.Sleep(3000); var abd = 2;" });
+        await s.Send(new { id = 3, cmd = "complete", code = "ab", position = 2 });
+
+        var first = await s.Receive();
+        Assert.Equal(3, first.GetProperty("id").GetInt32());
+        Assert.True(first.GetProperty("ok").GetBoolean(), first.ToString());
+        Assert.Equal(0, first.GetProperty("start").GetInt32());
+        Assert.Equal(2, first.GetProperty("length").GetInt32());
+        var labels = first.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("label").GetString()).ToList();
+        Assert.Contains("abc", labels);
+        Assert.DoesNotContain("abd", labels); // the busy run has not finished: its variables don't exist yet
+        Assert.Equal("variable", first.GetProperty("items")[0].GetProperty("kind").GetString());
+
+        Assert.Equal(2, (await s.Receive()).GetProperty("id").GetInt32());
+        await s.Finish();
+    }
+
+    [Fact]
     public async Task Loop_UnicodeRoundTrip()
     {
         using var s = new Session();
