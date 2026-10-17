@@ -104,7 +104,17 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             settings.additionalLinesCount = 0
             setVerticalScrollbarVisible(true)
         }
-    }.apply { setFontInheritedFromLAF(false) }
+
+        // At least three lines high, so the input is an obvious place to type and not a one-line strip above the hint.
+        override fun getPreferredSize(): java.awt.Dimension = super.getPreferredSize().apply {
+            height = maxOf(height, (editor?.lineHeight ?: JBUI.scale(18)) * 3 + insets.top + insets.bottom)
+        }
+    }.apply {
+        setFontInheritedFromLAF(false)
+        setPlaceholder("Type C# here")
+        setShowPlaceholderWhenFocused(true)
+        border = JBUI.Borders.compound(JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0), JBUI.Borders.empty(2, 4))
+    }
     private val inputHistory = InputHistory { session.history.filter { it.status != "note" }.map { it.code } }
 
     private val pendingText = JBTextArea().apply {
@@ -158,6 +168,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         onInput("UP", { !session.analyzing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
         onInput("DOWN", { !session.analyzing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
 
+        forwardHistoryFocusToInput()
         Disposer.register(parent) { EditorFactory.getInstance().releaseEditor(history) }
         ApplicationManager.getApplication().messageBus.connect(parent).subscribe(ReplSettings.TOPIC, ReplSettingsListener { applySettings() })
         session.addListener(parent, ::sync)
@@ -204,6 +215,28 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     private fun setInput(text: String) {
         input.text = text
         input.editor?.caretModel?.moveToOffset(text.length)
+    }
+
+    /**
+     * Like a console: a click into the read-only history (without selecting text) or typing there moves focus to the
+     * input. Typed characters follow, because AWT redelivers key events queued behind a focus request to the new owner.
+     */
+    private fun forwardHistoryFocusToInput() {
+        val target = { input.editor?.contentComponent }
+        history.contentComponent.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseReleased(e: java.awt.event.MouseEvent) {
+                if (javax.swing.SwingUtilities.isLeftMouseButton(e) && !history.selectionModel.hasSelection()) target()?.requestFocus()
+            }
+        })
+        history.contentComponent.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                val printable = e.keyChar != java.awt.event.KeyEvent.CHAR_UNDEFINED && !Character.isISOControl(e.keyChar)
+                if (printable && !e.isControlDown && !e.isAltDown && !e.isMetaDown) {
+                    input.editor?.caretModel?.moveToOffset(input.document.textLength)
+                    target()?.requestFocus()
+                }
+            }
+        })
     }
 
     private fun caretLine() = input.editor?.caretModel?.logicalPosition?.line ?: 0

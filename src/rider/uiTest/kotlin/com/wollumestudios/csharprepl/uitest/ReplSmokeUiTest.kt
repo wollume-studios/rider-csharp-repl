@@ -181,7 +181,7 @@ class ReplSmokeUiTest {
         check(window.getContentManager().getContentCount() == 1) { "$name: no REPL content\n$dump" }
         val panel = ideFrame().x { byType("com.wollumestudios.csharprepl.ui.ReplPanel") }
         val input = cast(cast(panel.component, ReplPanel::class).getInput(), com.intellij.driver.sdk.ui.remote.Component::class)
-        check(input.isShowing() && input.width > 0 && input.height > 0) { "$name: input not painted\n$dump" }
+        check(input.isShowing() && input.width > 0 && input.height >= 40) { "$name: input not painted or too small (${input.height}px)\n$dump" }
         val buttons = panel.xx { byType("com.intellij.openapi.actionSystem.impl.ActionButton") }.list().filter { it.component.isShowing() && it.component.width > 0 }
         check(buttons.size >= 3) { "$name: toolbar has ${buttons.size} visible buttons\n$dump" }
         val table = panel.x { byType("com.intellij.ui.treeStructure.treetable.TreeTable") }.component
