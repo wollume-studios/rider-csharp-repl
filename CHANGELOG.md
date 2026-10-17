@@ -2,6 +2,8 @@
 
 ## Unreleased
 - Code completion in the input while typing (and on Ctrl+Space): the session's variables, methods and types, members after a `.`, namespaces, types of referenced projects and packages, and keywords. Enter/Tab insert the item and never run the input while the popup shows; Escape closes it. Completion only compiles, it never runs code, and it answers while a command is still running.
+- C# highlighting colors contextual keywords (`var`, `await`, `async`, `record`, …) in the input and the history; Rider's frontend lexer leaves them to the backend.
+- *Run Single-File App* (editor menu, ▶ on the first line of a file-based app): `dotnet run <file>` in the Run tool window. Rider has no Run button for scratch files.
 - *To Single-File App* and *Dump Variables* write straight into a new scratch file (`session-<date>.cs`, `variables-<date>.cs` in Scratches and Consoles), no save dialog.
 
 ## 0.1.0

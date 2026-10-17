@@ -18,6 +18,8 @@
         <notificationGroup id="CSharpRepl" displayType="BALLOON"/>
         <!-- A project dropped on a single-file app's editor (.cs outside the solution's projects, or with #: directives) inserts #:project. -->
         <fileDropHandler implementation="com.wollumestudios.csharprepl.singlefile.SingleFileProjectDrop"/>
+        <!-- ▶ on the first line of a single-file app (Rider's frontend C# language): Run Single-File App. -->
+        <runLineMarkerContributor language="C#" implementationClass="com.wollumestudios.csharprepl.singlefile.RunSingleFileAppLineMarker"/>
     </extensions>
 
     <projectListeners>
@@ -57,6 +59,9 @@
         <action id="CSharpRepl.ExportToSingleFile" class="com.wollumestudios.csharprepl.singlefile.ExportToSingleFileAction"/>
         <action id="CSharpRepl.ExportToSingleFileExcludeThrown" class="com.wollumestudios.csharprepl.singlefile.ExportToSingleFileExcludeThrownAction"/>
         <action id="CSharpRepl.ExportSplitButton" class="com.wollumestudios.csharprepl.singlefile.ExportSplitButtonAction"/>
+        <action id="CSharpRepl.RunSingleFileApp" class="com.wollumestudios.csharprepl.singlefile.RunSingleFileAppAction">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
         <action id="CSharpRepl.AddProjectDirective" class="com.wollumestudios.csharprepl.singlefile.AddProjectDirectiveAction">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="GenerateGroup" anchor="last"/>

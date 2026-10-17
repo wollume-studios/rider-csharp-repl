@@ -28,6 +28,7 @@ Open the **C# REPL** tool window (bottom bar). Every feature is also an action (
 | **To Single-File App** | Toolbar split button: saves the session as a .NET 10 file-based app in a new scratch file (*Scratches and Consoles*, `session-<date>.cs`, no dialog) and opens it. Results become `Console.WriteLine`, redeclared variables are renamed, references become `#:project` / `#:package` directives; it compiles and runs like the session. The second variant, *Exclude Commands That Threw*, leaves those out. |
 | **Dump Variables** | Toolbar: a new scratch file (`variables-<date>.cs`, no dialog), a single-file app with `var name = <value as C#>;` for every variable; values that can't be written as code become comments. |
 | **New C# Single-File App** | File › New (also ⚙): `<name>.cs` with `#!/usr/bin/env dotnet` and a `Console.WriteLine`. Run it with Rider's Run button or `dotnet run <name>.cs`. |
+| **Run Single-File App** | Editor menu, or ▶ on the first line of a `.cs` file starting with `#!` or holding `#:` directives: `dotnet run <file>` in the Run tool window, in the file's folder. Rider 2026.3 shows its own Run button for file-based apps in the solution folder, but none for scratch files (exports and dumps). |
 | **Add Project Reference Directive** | Editor menu / Generate in a single-file app: inserts `#:project <relative path>` for a solution project. Dropping a project onto a single-file app's editor does the same. |
 
 **Settings** (*Settings › Tools › C# REPL*, or ⚙): run on Enter (auto-run default), variables table right of the
@@ -58,13 +59,16 @@ starts a sandbox Rider with the plugin.
 ## Tests
 
 ```
-dotnet test CSharpRepl.sln   # host: completeness, auto-;, variables, references, dump and export round trips
+dotnet test CSharpRepl.sln   # host: completeness, auto-;, completion, variables, references, dump and export round trips
 ./gradlew unitTest           # frontend logic without an IDE
 ./gradlew uiTest             # a real Rider on samples/SampleSolution (slow; Windows)
 ```
 
 `uiTest` starts the Rider in `CSHARPREPL_RIDER` (default `%LOCALAPPDATA%\Programs\Rider`) with the built plugin, runs
-`var r = 0`, checks the variables table, references the sample's `Greeter` project from Solution Explorer and calls it.
+`var r = 0`, checks the variables table, references the sample's `Greeter` project from Solution Explorer and calls it;
+checks completion (the lookup, Enter/Escape while it shows) and the input's and history's colors; drops Solution
+Explorer's own drag object for `Greeter` onto the REPL and onto a single-file app; exports both split-button variants and
+runs them with `dotnet run`; and runs an export with *Run Single-File App*. Screenshots go to `build/screenshots`.
 
 ## Layout
 

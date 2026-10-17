@@ -12,6 +12,9 @@ the session into a .NET 10 single-file app when it grows.</p>
     Shift+Enter runs now.</li>
   <li><b>Nothing runs that you can't see</b>: in manual mode a box shows the pending code that the next complete command
     will run with, so two commands are never merged silently.</li>
+  <li><b>Completion while typing</b> (and on Ctrl+Space): the session's variables, methods and types, members after a
+    <code>.</code>, namespaces, referenced projects' and packages' types, keywords. Enter or Tab inserts, and never runs
+    the input while the popup shows.</li>
   <li>History with C# highlighting, console output, results and errors. Up/Down step through earlier commands, Escape
     clears the input.</li>
   <li><b>Variables table</b> like the debugger's (Name, Value, Type), with expandable fields and properties. The last
@@ -31,10 +34,12 @@ the session into a .NET 10 single-file app when it grows.</p>
 
 <h3>Single-file apps</h3>
 <ul>
-  <li><b>To Single-File App</b>: the session as a .NET 10 file-based app that compiles and runs like the session
+  <li><b>To Single-File App</b>: the session, in a new scratch file, as a .NET 10 file-based app that compiles and runs like the session
     (references become <code>#:project</code> / <code>#:package</code> directives); a variant leaves out the commands
     that threw.</li>
-  <li><b>Dump Variables</b>: a new single-file app with the current variables as C# code.</li>
+  <li><b>Dump Variables</b>: a new single-file app (a scratch file) with the current variables as C# code.</li>
+  <li><b>Run Single-File App</b> (editor menu, ▶ on the first line of a scratch or other file-based app Rider has no Run
+    button for): <code>dotnet run</code> in the Run tool window.</li>
   <li><b>New C# Single-File App</b> (File › New), <b>Add Project Reference Directive</b> (editor menu), and dropping a
     project onto a single-file app's editor inserts <code>#:project</code>.</li>
 </ul>

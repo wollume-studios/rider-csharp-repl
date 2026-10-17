@@ -56,7 +56,11 @@ class ReplSmokeUiTest {
                     override fun reportTestFailure(
                         testName: String, message: String, details: String, linkToLogs: String?,
                         kind: TeamCityReporter.SyntheticTestKind, isIgnored: Boolean, metadata: List<TeamCityReporter.TestMetadata>,
-                    ) = fail { "$testName fails: $message.\n$details" }
+                    ) {
+                        // Rider's own ReSharper backend errors (this plugin has no backend), e.g. a project reload racing a file-based app being opened.
+                        if ("BackendException" in message + details && "com.wollumestudios" !in details) return println("Ignored Rider backend error in $testName: $message")
+                        fail { "$testName fails: $message.\n$details" }
+                    }
                 }
             }
         }
@@ -229,10 +233,10 @@ class ReplSmokeUiTest {
         println("app.cs after the drop:\n" + withContext(OnDispatcher.EDT) { appEditor.getDocument().getText() })
 
         // b) The split button's popup, then both variants.
-        panelUi.enter("var r = 41;")
-        panelUi.enter("Greeter.Hi(\"x\") + (r + 1)")
-        panelUi.enter("int.Parse(\"x\")")
-        waitFor("three commands ran", timeout = 2.minutes) { session.getHistory().count { it.getStatus() in setOf("ok", "threw") } >= 3 }
+        for (code in listOf("var r = 41;", "Greeter.Hi(\"x\") + (r + 1)", "int.Parse(\"x\")")) {
+            panelUi.enter(code)
+            waitFor("$code ran", timeout = 2.minutes) { session.getHistory().any { it.getCode() == code && it.getStatus() in setOf("ok", "threw") } }
+        }
         val split = panelUi.x { byType("com.intellij.openapi.actionSystem.SplitButtonAction\$SplitButton") }.component
         withContext(OnDispatcher.EDT) { // a click on the arrow half, as mouse events (no OS mouse)
             val c = cast(split, AwtComponentRef::class)
@@ -268,20 +272,53 @@ class ReplSmokeUiTest {
         println("dotnet run ${all.name}: exit $allCode (the session's last command threw)\n$allOut")
         check("Hi x42" in allOut && "FormatException" in allOut) { "dotnet run ${all.name}: exit $allCode\n$allOut" }
 
-        // c) What Rider offers to run the exported file: gutter icons on its first lines, and run configurations from the context.
+        // c) What Rider offers to run a file-based app: gutter icons on its lines, and run configurations from the context;
+        //    for app.cs in the solution folder and for the exported scratch file.
         val exported = withContext(OnDispatcher.EDT) { utility(FileEditorManagerRef::class).getInstance(project).getSelectedTextEditor() ?: fail("no editor") }
-        Thread.sleep(15000) // daemon / backend markup
-        val gutter = withContext(OnDispatcher.EDT) {
-            val g = cast(exported.getGutter(), GutterRef::class)
-            (0 until 3).flatMap { line -> g.getGutterRenderers(line).map { "line $line: ${it.getTooltipText()} (${it.toString()})" } }
+        fun describe(editor: EditorRef) = withContext(OnDispatcher.EDT) {
+            val g = editor.getGutter()
+            (0 until 10).flatMap { line -> g.getGutterRenderers(line).map { m ->
+                val click = m.getClickAction()
+                val icon = m.getIcon()?.let { i -> runCatching { cast(i, IconPathRef::class).getOriginalPath() }.getOrNull() ?: i.getClass().getName() }
+                "line ${line + 1}: ${m.getClass().getName().substringAfterLast('.')} icon=$icon tooltip=${m.getTooltipText()} click=${click?.getTemplateText()} (${click?.getClass()?.getName()})"
+            } }
         }
-        val configurations = withContext(OnDispatcher.EDT) {
-            val context = utility(ConfigurationContextRef::class).getFromContext(utility(DataManagerRef::class).getInstance().getDataContext(exported.getContentComponent()), "EditorPopup")
-            context.getConfigurationsFromContext()?.map { it.getConfiguration().getName() + " [" + it.getConfiguration().getType().getId() + "]" }.orEmpty()
+        // Rider's backend marks (BackendGutterMarkWrapper: build, run) come after it synced a project for the file; watch for 3 minutes.
+        val seen = linkedSetOf<String>()
+        runCatching { waitFor("Rider's gutter marks on the scratch file", timeout = 3.minutes) { describe(exported).filter { "BackendGutterMark" in it }.also { seen += it }.isNotEmpty() && seen.size > 1 } }
+        println("Rider's own gutter marks seen on the scratch file: $seen")
+        Thread.sleep(3000) // repaint
+        shot("single-file-gutter-scratch")
+        withContext(OnDispatcher.EDT, LockSemantics.WRITE_ACTION) { utility(FileEditorManagerRef::class).getInstance(project).openFile(appEditor.getVirtualFile(), true) }
+        Thread.sleep(3000)
+        shot("single-file-gutter-app")
+        val report = buildString {
+            for ((name, editor) in listOf("app.cs (solution folder)" to appEditor, "${ok.name} (scratch file)" to exported)) {
+                val configurations = withContext(OnDispatcher.EDT, LockSemantics.READ_ACTION) { // producers read PSI
+                    val context = utility(ConfigurationContextRef::class).getFromContext(utility(DataManagerRef::class).getInstance().getDataContext(editor.getContentComponent()), "EditorPopup")
+                    context.getConfigurationsFromContext()?.map { it.getConfiguration().getName() + " [" + it.getConfiguration().getType().getId() + "]" }.orEmpty()
+                }
+                appendLine("$name: gutter=${describe(editor)} configurations=$configurations")
+            }
+            appendLine("Rider's marks seen on the scratch file while it synced: $seen")
         }
-        println("exported file gutter: $gutter\nrun configurations from context: $configurations")
-        Files.writeString(screenshots.resolve("singlefile-run-check.txt"), "gutter: $gutter\nconfigurations: $configurations\n")
-        shot("single-file-gutter")
+        println("run check:\n$report")
+        Files.writeString(screenshots.resolve("singlefile-run-check.txt"), report)
+
+        // Run Single-File App (editor menu / our gutter ▶) on the scratch file: dotnet run in the Run tool window.
+        withContext(OnDispatcher.EDT, LockSemantics.WRITE_ACTION) { utility(FileEditorManagerRef::class).getInstance(project).openFile(exported.getVirtualFile(), true) }
+        invokeAction("CSharpRepl.RunSingleFileApp", component = exported.getContentComponent())
+        val run = waitNotNull("${ok.name} ran in the Run tool window", timeout = 3.minutes) {
+            withContext(OnDispatcher.EDT) {
+                utility(RunContentManagerRef::class).getInstance(project).getAllDescriptors()
+                    .firstOrNull { it.getDisplayName() == ok.name && it.getProcessHandler()?.isProcessTerminated() == true }
+                    ?.let { d -> cast(d.getExecutionConsole(), ConsoleViewRef::class).let { c -> c.flushDeferredText(); d.getProcessHandler()!!.getExitCode() to c.getText() } }
+            }
+        }
+        println("Run Single-File App: exit ${run.first}\n${run.second}")
+        Thread.sleep(1000)
+        shot("single-file-run")
+        check(run.first == 0 && "Hi x42" in run.second) { "Run Single-File App: exit ${run.first}\n${run.second}" }
     }
 
     /** `dotnet run <file>` in the file's folder: exit code and output (stdout and stderr). */
@@ -505,6 +542,7 @@ interface EditorRef {
     fun getContentComponent(): com.intellij.driver.sdk.ui.remote.Component
     fun getDocument(): DocumentRef
     fun getGutter(): GutterRef
+    fun getVirtualFile(): com.intellij.driver.sdk.VirtualFile
 }
 
 @Remote("com.intellij.openapi.editor.Document")
@@ -778,9 +816,33 @@ interface GutterRef {
     fun getGutterRenderers(line: Int): List<GutterMarkRef>
 }
 
-@Remote("com.intellij.openapi.editor.markup.GutterMark")
+@Remote("com.intellij.openapi.editor.markup.GutterIconRenderer")
 interface GutterMarkRef {
     fun getTooltipText(): String?
+    fun getClass(): ClassRef
+    fun getClickAction(): AnActionRef?
+    fun getIcon(): IconRef?
+}
+
+@Remote("javax.swing.Icon")
+interface IconRef {
+    fun getClass(): ClassRef
+}
+
+@Remote("com.intellij.ui.icons.IconPathProvider")
+interface IconPathRef {
+    fun getOriginalPath(): String?
+}
+
+@Remote("com.intellij.openapi.actionSystem.AnAction")
+interface AnActionRef {
+    fun getTemplateText(): String?
+    fun getClass(): ClassRef
+}
+
+@Remote("java.lang.Class")
+interface ClassRef {
+    fun getName(): String
 }
 
 @Remote("com.intellij.execution.actions.ConfigurationContext")
@@ -803,4 +865,29 @@ interface RunConfigurationRef {
 @Remote("com.intellij.execution.configurations.ConfigurationType")
 interface ConfigurationTypeRef {
     fun getId(): String
+}
+
+@Remote("com.intellij.execution.ui.RunContentManager")
+interface RunContentManagerRef {
+    fun getInstance(project: com.intellij.driver.sdk.Project): RunContentManagerRef
+    fun getAllDescriptors(): List<RunContentDescriptorRef>
+}
+
+@Remote("com.intellij.execution.ui.RunContentDescriptor")
+interface RunContentDescriptorRef {
+    fun getDisplayName(): String
+    fun getProcessHandler(): ProcessHandlerRef?
+    fun getExecutionConsole(): AnyRef
+}
+
+@Remote("com.intellij.execution.process.ProcessHandler")
+interface ProcessHandlerRef {
+    fun isProcessTerminated(): Boolean
+    fun getExitCode(): Int?
+}
+
+@Remote("com.intellij.execution.impl.ConsoleViewImpl")
+interface ConsoleViewRef {
+    fun flushDeferredText()
+    fun getText(): String
 }
