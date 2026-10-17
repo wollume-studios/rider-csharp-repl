@@ -13,12 +13,11 @@ import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.ColoredListCellRenderer
 import javax.swing.JList
 import com.wollumestudios.csharprepl.refs.RiderProjectModel
-import java.nio.file.Files
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.fileChooser.FileChooserFactory
-import com.intellij.openapi.fileChooser.FileSaverDescriptor
+import com.intellij.ide.scratch.ScratchFileService
+import com.intellij.ide.scratch.ScratchRootType
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.DumbAwareToggleAction
@@ -31,7 +30,6 @@ import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import java.io.File
 import java.io.IOException
-import java.nio.file.Path
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.CompletableFuture
@@ -42,20 +40,13 @@ object SingleFile {
     private val STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm")
 
     /**
-     * `<solution dir>/scratch/`, unless a file there would sit under a `.csproj` (the project would compile it and break its
-     * build): then `<user.home>/CSharpRepl/scratch/`. Created here so the dialog opens in it; null when it can't be created.
+     * A new scratch file (Scratches and Consoles, outside every project, so no build globs it), named
+     * `<prefix>-<yyyyMMdd-HHmm>.cs` with `-2`, `-3`… when taken. No dialog.
      */
-    fun scratchDir(project: Project): Path? {
-        val probe = project.basePath?.let { File(it, "scratch/x.cs") }
-        // Any .csproj above it globs the file, whether or not that project is in the solution.
-        val dir = if (probe == null || DirectiveInserter.nearestProject(probe) != null) Path.of(System.getProperty("user.home"), "CSharpRepl", "scratch") else probe.parentFile.toPath()
-        return try { Files.createDirectories(dir) } catch (e: IOException) { null }
-    }
-
-    /** Save dialog in [scratchDir], named `<prefix>-<yyyyMMdd-HHmm>.cs`; null when cancelled. */
-    fun chooseTarget(project: Project, prefix: String, title: String): File? {
-        val dialog = FileChooserFactory.getInstance().createSaveFileDialog(FileSaverDescriptor(title, "Save as a single-file app", "cs"), project)
-        return dialog.save(scratchDir(project), "$prefix-${LocalDateTime.now().format(STAMP)}.cs")?.file
+    fun newScratchFile(prefix: String): File {
+        val root = File(ScratchFileService.getInstance().getRootPath(ScratchRootType.getInstance()))
+        val stamp = "$prefix-${LocalDateTime.now().format(STAMP)}"
+        return generateSequence(1) { it + 1 }.map { File(root, if (it == 1) "$stamp.cs" else "$stamp-$it.cs") }.first { !it.exists() }
     }
 
     /** Writes [text] to [file] through the VFS (creating its folder), then opens it. Call on the EDT. */
@@ -134,7 +125,7 @@ abstract class ExportAction(text: String, private val excludeThrown: Boolean) : 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
         val modality = ModalityState.current()
-        val file = SingleFile.chooseTarget(project, "session", "Save Session as Single-File App") ?: return
+        val file = SingleFile.newScratchFile("session")
         SingleFile.whenAnswered(project, "Export", modality, ReplSession.getInstance(project).export(file.path, excludeThrown)) { r ->
             if (SingleFile.missingText(project, "Export", r.text)) return@whenAnswered
             SingleFile.saveAndOpen(project, file, r.text)
@@ -159,7 +150,7 @@ class DumpVariablesAction : DumbAwareAction("Dump Variables", "Save the variable
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
         val modality = ModalityState.current()
-        val file = SingleFile.chooseTarget(project, "variables", "Save Variables as Single-File App") ?: return
+        val file = SingleFile.newScratchFile("variables")
         SingleFile.whenAnswered(project, "Dump", modality, ReplSession.getInstance(project).dump(file.path)) { r ->
             if (SingleFile.missingText(project, "Dump", r.text)) return@whenAnswered
             SingleFile.saveAndOpen(project, file, r.text)
