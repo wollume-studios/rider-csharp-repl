@@ -23,12 +23,13 @@ class ReplayTest {
     }
 
     @Test
-    fun `a replay after a restore does not rerun the restore script`() {
+    fun `a replay after a restore reruns the restore script once, then the later commands`() {
         // Restore: "Restoring variables…", new host, then the restore script runs; the user goes on in that host.
+        // The later commands use the restored variables, so the script must run again first.
         val beforeRestore = listOf(ok("var a = 1;"), HistoryEntry.note("Restoring variables…"))
         val restored = beforeRestore + HistoryEntry.note("Session restarted, running the restore script") +
             HistoryEntry("var a = 1;", "ok", restore = true) + ok("a += 2;")
-        assertEquals(listOf("a += 2;"), replayCommands(restored, beforeRestore.size))
+        assertEquals(listOf("var a = 1;", "a += 2;"), replayCommands(restored, beforeRestore.size))
     }
 
     @Test

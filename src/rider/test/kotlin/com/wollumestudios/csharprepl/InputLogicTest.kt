@@ -73,4 +73,13 @@ class InputLogicTest {
         assertEquals(true, isStale(atKey, atKey.copy(generation = 2))) // Stop / restart / crash
         assertEquals(true, isStale(atKey, atKey.copy(resets = 1))) // Reset
     }
+
+    @Test
+    fun `host works in the solution folder, or the home folder when that folder is missing`() {
+        val dir = java.nio.file.Files.createTempDirectory("repl-wd")
+        val home = System.getProperty("java.io.tmpdir")
+        assertEquals(dir, workingDir(dir.toString(), home))
+        assertEquals(java.nio.file.Paths.get(home), workingDir(dir.resolve("missing").toString(), home))
+        assertEquals(java.nio.file.Paths.get(home), workingDir(null, home))
+    }
 }

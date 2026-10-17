@@ -13,6 +13,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.wollumestudios.csharprepl.host.AddReferenceResponse
+import com.wollumestudios.csharprepl.host.DotnetLocator
 import com.wollumestudios.csharprepl.host.AnalyzeResponse
 import com.wollumestudios.csharprepl.host.DumpResponse
 import com.wollumestudios.csharprepl.host.ExpandResponse
@@ -30,7 +31,6 @@ import com.wollumestudios.csharprepl.refs.WatchedProject
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import java.io.File
 import java.io.IOException
-import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -350,10 +350,12 @@ class ReplSession(private val project: Project) : Disposable {
         sessionStart = entries.size // what the history shows so far never ran in this host (0 after a reset)
         host = try {
             HostProcess(HostLocator.hostDll(), onExit = { code, killed -> if (!killed) onEdt { hostExited(gen, code) } }, log = LOG::info,
-                workingDir = project.basePath?.let { Paths.get(it) })
+                workingDir = workingDir(project.basePath))
         } catch (e: IOException) {
             LOG.warn(e)
-            val note = HistoryEntry.note("dotnet not found (PATH, DOTNET_ROOT, default install locations) — install the .NET 8+ SDK")
+            val note = HistoryEntry.note(
+                if (DotnetLocator.dotnet == null) "dotnet not found (PATH, DOTNET_ROOT, default install locations) — install the .NET 8+ SDK"
+                else "C# REPL host could not start: ${e.message}")
             if (history.lastOrNull() != note) append(note)
             null
         } ?: return

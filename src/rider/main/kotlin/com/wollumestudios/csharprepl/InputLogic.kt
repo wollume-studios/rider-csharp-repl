@@ -8,6 +8,10 @@ sealed interface EnterAction {
     data class ToPending(val line: String) : EnterAction
 }
 
+/** The host's working directory: the solution folder, or the user's home when the project has none on disk. */
+fun workingDir(basePath: String?, home: String = System.getProperty("user.home")): java.nio.file.Path =
+    basePath?.let { java.nio.file.Paths.get(it) }?.takeIf { java.nio.file.Files.isDirectory(it) } ?: java.nio.file.Paths.get(home)
+
 /** The code `analyze` gets and a run submits: pending and input joined by a newline. */
 fun combine(pending: String, input: String) = if (pending.isEmpty()) input else "$pending\n$input"
 
@@ -37,7 +41,7 @@ fun isStale(atKey: EnterSnapshot, now: EnterSnapshot) = atKey != now
  * [history]. Earlier hosts' commands live on in the replays that followed them; the restore script is not a user command.
  */
 fun replayCommands(history: List<HistoryEntry>, sessionStart: Int): List<String> =
-    history.drop(sessionStart).filter { it.status == "ok" && !it.restore }.map { it.code }
+    history.drop(sessionStart).filter { it.status == "ok" }.map { it.code } // a restore script in this host's session runs again first: later commands use its variables
 
 /** Up/Down through submitted commands ([entries], oldest first); the text being edited comes back after the newest. */
 class InputHistory(private val entries: () -> List<String>) {
