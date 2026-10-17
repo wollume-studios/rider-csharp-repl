@@ -15,6 +15,7 @@ import com.intellij.openapi.util.Disposer
 import com.wollumestudios.csharprepl.host.AddReferenceResponse
 import com.wollumestudios.csharprepl.host.DotnetLocator
 import com.wollumestudios.csharprepl.host.AnalyzeResponse
+import com.wollumestudios.csharprepl.host.CompleteResponse
 import com.wollumestudios.csharprepl.host.DumpResponse
 import com.wollumestudios.csharprepl.host.ExpandResponse
 import com.wollumestudios.csharprepl.host.ExportResponse
@@ -205,6 +206,24 @@ class ReplSession(private val project: Project) : Disposable {
     }
 
     fun clearPending() = setPending("")
+
+    /**
+     * Completion at [caret] in [input] with the pending code before it (the host compiles pending + input as the next
+     * submission). Completes on the EDT with spans relative to [input], or null when there is no answer or it came from
+     * a host that has been replaced meanwhile. Never starts a host.
+     */
+    fun complete(input: String, caret: Int): CompletableFuture<CompleteResponse?> {
+        val result = CompletableFuture<CompleteResponse?>()
+        val gen = generation
+        val prefix = if (pending.isEmpty()) "" else pending + "\n"
+        request("complete", mapOf("code" to prefix + input, "position" to prefix.length + caret)).whenComplete { json, _ ->
+            onEdt {
+                val r = json?.takeIf { gen == generation }?.let { gson.fromJson(it, CompleteResponse::class.java) }
+                result.complete(r?.copy(start = r.start - prefix.length))
+            }
+        }
+        return result
+    }
 
     fun expand(handle: Int): CompletableFuture<List<Var>> =
         request("expand", mapOf("handle" to handle)).thenApply { gson.fromJson(it, ExpandResponse::class.java).children }

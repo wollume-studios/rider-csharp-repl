@@ -242,10 +242,25 @@ class ToggleVariablesBelowAction : DumbAwareToggleAction("Variables Below Input"
     }
 }
 
-/** Enabled while the tool window exists and no Enter is waiting for `analyze`. */
+/**
+ * Enabled while the tool window exists, no Enter is waiting for `analyze` and no completion lookup shows in the input
+ * (then Enter, Tab and Escape go to the lookup: accept, close).
+ */
 abstract class InputAction(text: String, description: String) : DumbAwareAction(text, description, null) {
     override fun getActionUpdateThread() = ActionUpdateThread.EDT
     override fun update(e: AnActionEvent) {
-        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null && e.session?.analyzing != true
+        val panel = e.project?.let(ReplPanel::of)
+        e.presentation.isEnabled = panel != null && e.session?.analyzing != true && !panel.completion.lookupShowing
+    }
+}
+
+/** Ctrl+Space (Basic Completion's shortcut) in the input: completion now, from the session's variables, types and references. */
+class CompleteAction : DumbAwareAction("Complete Code in C# REPL", "Show completions for the identifier at the caret in the C# REPL input", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReplPanel.of(e.project ?: return)?.completion?.completeNow()
     }
 }

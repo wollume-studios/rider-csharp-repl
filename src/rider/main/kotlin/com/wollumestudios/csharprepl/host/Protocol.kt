@@ -32,3 +32,9 @@ data class DumpResponse(val text: String, val notReproducible: List<String>)
 data class RestoreScriptResponse(val code: String, val notReproducible: List<String>)
 
 data class ExportResponse(val text: String, val warnings: List<String>)
+
+/** `complete` item; [kind]: "variable", "method", "property", "field", "event", "parameter", "namespace", "class", "struct", "interface", "enum", "delegate", "keyword" or "other". */
+data class CompletionItem(val label: String, val kind: String, val detail: String)
+
+/** `complete`: an item replaces [start, start + [length]) of the code, the identifier prefix before the caret. */
+data class CompleteResponse(val start: Int, val length: Int, val items: List<CompletionItem>)

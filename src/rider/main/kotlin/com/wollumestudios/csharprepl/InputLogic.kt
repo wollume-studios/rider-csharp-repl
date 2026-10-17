@@ -70,3 +70,34 @@ class InputHistory(private val entries: () -> List<String>) {
         index = -1
     }
 }
+
+/** Where the identifier ending at [end] in [text] starts (letters, digits, `_`). */
+fun identifierStart(text: CharSequence, end: Int): Int {
+    var i = end
+    while (i > 0 && (text[i - 1].isLetterOrDigit() || text[i - 1] == '_')) i--
+    return i
+}
+
+/**
+ * Whether typing the last character of [before] (the input up to the caret) pops completion up: an identifier character
+ * that is not part of a number, or a member-access `.` that does not follow a number (`1.` starts a double) or a dot.
+ */
+fun autoTriggers(before: CharSequence): Boolean {
+    val c = before.lastOrNull() ?: return false
+    return when {
+        c == '.' -> {
+            val end = before.length - 1
+            val start = identifierStart(before, end)
+            if (start < end) !before[start].isDigit() else end > 0 && before[end - 1] != '.' && !before[end - 1].isWhitespace()
+        }
+        c.isLetterOrDigit() || c == '_' -> !before[identifierStart(before, before.length)].isDigit()
+        else -> false
+    }
+}
+
+/** What a `complete` answer depends on: dropped when the input or the caret changed meanwhile (the session drops other hosts' answers). */
+data class CompletionSnapshot(val text: String, val caret: Int)
+
+/** The lookup's prefix for an answer: the text it replaces, which must end at the caret; null when the answer does not fit the input. */
+fun lookupPrefix(text: String, caret: Int, start: Int, length: Int): String? =
+    if (start < 0 || length < 0 || start + length != caret || caret > text.length) null else text.substring(start, caret)

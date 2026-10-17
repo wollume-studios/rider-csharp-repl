@@ -33,10 +33,12 @@
         <action id="CSharpRepl.ClearPending" class="com.wollumestudios.csharprepl.actions.ClearPendingAction"/>
         <action id="CSharpRepl.Settings" class="com.wollumestudios.csharprepl.actions.SettingsAction"/>
         <action id="CSharpRepl.ToggleVariablesBelow" class="com.wollumestudios.csharprepl.actions.ToggleVariablesBelowAction"/>
-        <!-- No keymap shortcuts: ReplPanel binds these on the input only (Enter, Shift+Enter, Escape by default, or what the user assigns in the keymap). -->
+        <!-- No keymap shortcuts: ReplPanel binds these on the input only (Enter, Shift+Enter, Escape, Ctrl+Space by default, or what the user assigns in the keymap). -->
         <action id="CSharpRepl.Enter" class="com.wollumestudios.csharprepl.actions.EnterKeyAction"/>
         <action id="CSharpRepl.ShiftEnter" class="com.wollumestudios.csharprepl.actions.ShiftEnterKeyAction"/>
         <action id="CSharpRepl.ClearInput" class="com.wollumestudios.csharprepl.actions.ClearInputAction"/>
+        <!-- Bound on the input with Basic Completion's shortcut (Ctrl+Space by default). -->
+        <action id="CSharpRepl.Complete" class="com.wollumestudios.csharprepl.actions.CompleteAction"/>
         <action id="CSharpRepl.AddReference" class="com.wollumestudios.csharprepl.actions.AddReferenceAction"/>
         <action id="CSharpRepl.ReferenceInRepl" class="com.wollumestudios.csharprepl.actions.ReferenceInReplAction">
             <add-to-group group-id="SolutionExplorerPopupMenu" anchor="last"/>

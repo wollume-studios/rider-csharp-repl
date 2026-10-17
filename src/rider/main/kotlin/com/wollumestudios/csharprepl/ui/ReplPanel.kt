@@ -70,10 +70,11 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private val csharp = FileTypeManager.getInstance().getFileTypeByExtension("cs")
     private val syntax = csharpHighlighter(project)
-    private val drop = ReferenceDrop(project)
+    val drop = ReferenceDrop(project)
     private val banner = ChangeBanner()
 
-    private val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
+    /** The read-only history editor (public for the UI test's highlighting check). */
+    val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
         UndoUtil.disableUndoFor(document)
         (this as? EditorImpl)?.setDropHandler(drop)
         settings.apply {
@@ -115,6 +116,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         setShowPlaceholderWhenFocused(true)
         border = JBUI.Borders.compound(JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0), JBUI.Borders.empty(2, 4))
     }
+    val completion = InputCompletion(project, input, parent)
     private val inputHistory = InputHistory { session.history.filter { it.status != "note" }.map { it.code } }
 
     private val pendingText = JBTextArea().apply {
@@ -165,8 +167,10 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         bindOnInput("CSharpRepl.Enter", "ENTER")
         bindOnInput("CSharpRepl.ShiftEnter", "shift ENTER")
         bindOnInput("CSharpRepl.ClearInput", "ESCAPE")
-        onInput("UP", { !session.analyzing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
-        onInput("DOWN", { !session.analyzing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
+        bindOnInput("CSharpRepl.Complete", "ctrl SPACE", fallbackActionId = "CodeCompletion")
+        // While the completion lookup shows, these are disabled, so the keys reach the editor and its lookup handlers.
+        onInput("UP", { !session.analyzing && !completion.lookupShowing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
+        onInput("DOWN", { !session.analyzing && !completion.lookupShowing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
 
         forwardHistoryFocusToInput()
         Disposer.register(parent) { EditorFactory.getInstance().releaseEditor(history) }
@@ -243,10 +247,11 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private fun lastLine() = maxOf(0, input.document.lineCount - 1)
 
-    private fun bindOnInput(actionId: String, defaultKeys: String) {
+    /** Binds [actionId] on the input: its keymap shortcuts if the user set any, else [fallbackActionId]'s (e.g. Basic Completion's), else [defaultKeys]. */
+    private fun bindOnInput(actionId: String, defaultKeys: String, fallbackActionId: String? = null) {
         val action = ActionUtil.wrap(actionId) // a wrapper: shortcuts of the registered (global) action must not be changed here
-        val keymap = KeymapUtil.getActiveKeymapShortcuts(actionId)
-        action.registerCustomShortcutSet(if (keymap.shortcuts.isNotEmpty()) keymap else CustomShortcutSet.fromString(defaultKeys), input)
+        val keymap = listOfNotNull(actionId, fallbackActionId).map(KeymapUtil::getActiveKeymapShortcuts).firstOrNull { it.shortcuts.isNotEmpty() }
+        action.registerCustomShortcutSet(keymap ?: CustomShortcutSet.fromString(defaultKeys), input)
     }
 
     private fun onInput(keys: String, enabled: () -> Boolean = { true }, run: () -> Unit) =

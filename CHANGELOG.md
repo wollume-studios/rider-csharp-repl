@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Code completion in the input while typing (and on Ctrl+Space): the session's variables, methods and types, members after a `.`, namespaces, types of referenced projects and packages, and keywords. Enter/Tab insert the item and never run the input while the popup shows; Escape closes it. Completion only compiles, it never runs code, and it answers while a command is still running.
+- *To Single-File App* and *Dump Variables* write straight into a new scratch file (`session-<date>.cs`, `variables-<date>.cs` in Scratches and Consoles), no save dialog.
+
 ## 0.1.0
 - C# REPL tool window, a replacement for Rider's C# Interactive (removed in Rider 2026.3): a persistent Roslyn scripting session in its own .NET process, so a crash, endless loop or `Environment.Exit` in REPL code never takes Rider down.
 - Auto-run mode (toggle, remembered): Enter runs the command and adds a missing `;` when that completes it; Shift+Enter inserts a new line. Manual mode: Enter collects lines until the command is complete, Shift+Enter runs now.
