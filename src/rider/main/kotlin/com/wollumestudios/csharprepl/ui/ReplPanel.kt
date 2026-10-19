@@ -44,6 +44,7 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.ui.EditorTextField
 import com.intellij.ui.JBColor
@@ -358,7 +359,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private fun indent(text: String) = "  " + text.replace("\n", "\n  ")
 
-    private fun append(text: String, key: TextAttributesKey?) {
+    // Documents take LF only: console output and ToString() results on Windows bring CRLF.
+    private fun append(raw: String, key: TextAttributesKey?) {
+        val text = StringUtil.convertLineSeparators(raw)
         val start = cursor
         history.document.insertString(start, text)
         cursor += text.length
@@ -369,7 +372,8 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
      * Lexes each piece of code on its own (not the whole document), so an unterminated comment or string in one entry
      * can't recolor the rest of the history.
      */
-    private fun appendCode(code: String) {
+    private fun appendCode(raw: String) {
+        val code = StringUtil.convertLineSeparators(raw)
         val start = cursor
         history.document.insertString(start, code)
         cursor += code.length

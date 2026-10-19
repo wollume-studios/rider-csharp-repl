@@ -20,6 +20,7 @@ Open the **C# REPL** tool window (bottom bar). Every feature is also an action (
 | **Auto-run** | Toolbar ⚡ toggle (remembered). On: Enter runs the input and adds a missing `;` when that completes the command; Shift+Enter inserts a new line. Off (manual): Enter adds the line to the pending code until the command is complete, Shift+Enter (or ▶ Run) runs pending code and input now. The hint under the input says what Enter does. |
 | **Pending box** | Manual mode: *Will run on next complete command* shows the code waiting for the rest of the command; ✕ discards it. |
 | **Completion** | While typing an identifier or after a `.`, a popup lists the session's variables, methods and types, members of the expression before the dot, namespaces, referenced projects' and packages' types, and keywords. Ctrl+Space (Basic Completion's shortcut) asks at once. Enter or Tab inserts the selected item, Escape closes the popup; while it shows, Enter does not run the input and Up/Down move in the list. Nothing runs to compute it: the host only compiles the input as the next command. |
+| **Highlighting** | The input and the history use your color scheme's C# colors (*Settings › Editor › Color Scheme › C#*): keywords, strings and comments from Rider's lexer, and method calls, extension methods, properties, fields, locals, parameters, types and namespaces from the host, which compiles the code as the next command (it never runs it) about 150 ms after you stop typing. History entries are classified against the session as it was before they ran. |
 | **History** | C# highlighted commands with console output, results (`ToString()`, strings quoted) and errors in red. Up/Down at the first/last input line step through earlier commands; Escape clears the input. |
 | **Variables** | Name / Value / Type like the debugger's Variables view; expand rows for fields and properties. The last exception is `$exception`: *[inspect ›]* in the history selects it. |
 | **Run / Stop / Reset** | ▶ runs now; ■ Stop kills a command that doesn't finish (the session restarts, variables are lost); ⟲ Reset clears history, variables and pending code and keeps the references. |
@@ -33,6 +34,34 @@ Open the **C# REPL** tool window (bottom bar). Every feature is also an action (
 
 **Settings** (*Settings › Tools › C# REPL*, or ⚙): run on Enter (auto-run default), variables table right of the
 history or below the input (applied live), ignore changes to referenced projects forever.
+
+## Screenshots
+
+![C# REPL tool window](docs/screenshots/repl-window.png)
+
+A session: results, console output, semantic colors, and a `FormatException` with `$exception` expanded in the variables table.
+
+![Completion](docs/screenshots/completion.png)
+
+Completion after `greeting.To`: it pops up while you type, or on Ctrl+Space.
+
+![Manual mode](docs/screenshots/manual-mode.png)
+
+Manual mode (⚡ off): Enter on the incomplete `var r = 0` moved it to the pending box; it runs with the next complete command.
+
+![Change banner](docs/screenshots/references-banner.png)
+
+`Greeter` referenced (Solution Explorer › *Reference in C# REPL*) and called, then `Greeter.cs` edited: the banner offers Rebuild ▾ and Ignore ▾.
+
+![NuGet picker](docs/screenshots/nuget-picker.png)
+
+*+ Reference › NuGet package…*: the solution's packages first, a nuget.org search below, versions for the selected package.
+
+![Single-file app](docs/screenshots/single-file-app.png)
+
+*To Single-File App*: the session as a .NET 10 file-based app (`#:project` for the reference, results printed). The action writes it into a new scratch file; this export is saved next to the solution, where Rider 2026.3 resolves file-based apps (in a scratch file it shows their symbols as unresolved, though `dotnet run` and *Run Single-File App* work).
+
+The screenshots are made by `./gradlew uiTest -PuiTestScreenshots` (`ScreenshotsUiTest`, on `samples/SampleSolution`).
 
 ## Build and install
 
@@ -59,14 +88,15 @@ starts a sandbox Rider with the plugin.
 ## Tests
 
 ```
-dotnet test CSharpRepl.sln   # host: completeness, auto-;, completion, variables, references, dump and export round trips
+dotnet test CSharpRepl.sln   # host: completeness, auto-;, completion, semantic classification, variables, references, dump and export round trips
 ./gradlew unitTest           # frontend logic without an IDE
 ./gradlew uiTest             # a real Rider on samples/SampleSolution (slow; Windows)
 ```
 
 `uiTest` starts the Rider in `CSHARPREPL_RIDER` (default `%LOCALAPPDATA%\Programs\Rider`) with the built plugin, runs
 `var r = 0`, checks the variables table, references the sample's `Greeter` project from Solution Explorer and calls it;
-checks completion (the lookup, Enter/Escape while it shows) and the input's and history's colors; drops Solution
+checks completion (the lookup, Enter/Escape while it shows) and the input's and history's colors (lexer and semantic: Rider's
+C# keys on `Select`, `Sum`, a method call and a lambda parameter); drops Solution
 Explorer's own drag object for `Greeter` onto the REPL and onto a single-file app; exports both split-button variants and
 runs them with `dotnet run`; and runs an export with *Run Single-File App*. Screenshots go to `build/screenshots`.
 

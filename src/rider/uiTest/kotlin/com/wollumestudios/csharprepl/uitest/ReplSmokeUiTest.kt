@@ -62,6 +62,11 @@ class ReplSmokeUiTest : UiTestBase() {
             variables.content().values.any { row -> row.values.toList().let { it.size >= 3 && it.takeLast(2) == listOf("0", "int") && nameCell(it[0]) == "r" } }
                 .also { if (!it) println("variables: ${variables.content()}; history: ${session.historyText()}") }
         }
+        // Console output of several lines (\r\n on Windows) goes into the history document (which takes \n only).
+        val loop = "for (var i = 0; i < 2; i++) Console.WriteLine(i);"
+        panel.enter(loop)
+        waitFor("two lines of output", timeout = 1.minutes) { session.getHistory().any { it.getCode() == loop && it.getStatus() == "ok" } }
+        Thread.sleep(500) // rendered (an IDE error fails the test)
 
         // 2. Solution Explorer › Greeter › Reference in C# REPL (Rider's project model gives the .csproj), then call into it.
         val tree = selectGreeter()
@@ -529,6 +534,10 @@ interface LookupManagerRef {
 @Remote("com.intellij.codeInsight.lookup.Lookup")
 interface LookupRef {
     fun getItems(): List<LookupElementRef>
+}
+
+@Remote("com.intellij.codeInsight.lookup.impl.LookupImpl")
+interface LookupImplRef {
     fun getComponent(): com.intellij.driver.sdk.ui.remote.Component
 }
 
@@ -691,6 +700,17 @@ interface EditorTextField {
 interface ReplSession {
     fun getHistory(): List<HistoryEntry>
     fun getChangedProject(): String?
+    fun export(filePath: String, excludeThrown: Boolean): FutureRef
+}
+
+@Remote("java.util.concurrent.CompletableFuture")
+interface FutureRef {
+    fun get(): AnyRef
+}
+
+@Remote("com.wollumestudios.csharprepl.host.ExportResponse", plugin = PLUGIN)
+interface ExportResponseRef {
+    fun getText(): String
 }
 
 @Remote("com.wollumestudios.csharprepl.HistoryEntry", plugin = PLUGIN)
