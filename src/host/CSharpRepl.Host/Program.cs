@@ -21,7 +21,7 @@ public static class Program
 
     public static StreamReader CreateInputReader(Stream stream) => new(stream, new UTF8Encoding(false));
 
-    /// <summary>Reads requests until EOF, then calls <paramref name="onEof"/> (if any) before waiting for the queued work. `run`, `variables`, `expand`, `dump`, `restoreScript`, `export` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze` and `complete` (compile only, from the last finished submission's state) are answered immediately.</summary>
+    /// <summary>Reads requests until EOF, then calls <paramref name="onEof"/> (if any) before waiting for the queued work. `run`, `variables`, `expand`, `dump`, `restoreScript`, `export` (which can execute user code) and `addReference` (which mutates the script options) go through one sequential queue; `analyze`, `complete` and `classify` (compile only, from the last finished submission's state) are answered immediately.</summary>
     public static async Task RunLoop(TextReader input, Stream output, ReplEngine engine, Action? onEof = null)
     {
         var writer = new ProtocolWriter(output);
@@ -61,6 +61,9 @@ public static class Program
                     break;
                 case "complete":
                     writer.Ok(request.Id, engine.Complete(request.Code ?? "", request.Position ?? (request.Code ?? "").Length));
+                    break;
+                case "classify":
+                    writer.Ok(request.Id, new ClassifyResponse(engine.Classify(request.Code ?? "")));
                     break;
                 case "run":
                     writer.Ok(request.Id, await engine.RunAsync(request.Code ?? ""));

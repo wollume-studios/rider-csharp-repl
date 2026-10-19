@@ -46,25 +46,7 @@ import kotlin.time.Duration.Companion.seconds
  * Everything goes through actions and IDE APIs (no OS mouse/keyboard), so it runs without focus.
  * Run: ./gradlew uiTest (Rider from CSHARPREPL_RIDER, else %LOCALAPPDATA%\Programs\Rider).
  */
-class ReplSmokeUiTest {
-    init {
-        // IDE exceptions fail the test instead of going to TeamCity.
-        di = DI {
-            extend(di)
-            bindSingleton<CIServer>(overrides = true) {
-                object : CIServer by NoCIServer {
-                    override fun reportTestFailure(
-                        testName: String, message: String, details: String, linkToLogs: String?,
-                        kind: TeamCityReporter.SyntheticTestKind, isIgnored: Boolean, metadata: List<TeamCityReporter.TestMetadata>,
-                    ) {
-                        // Rider's own ReSharper backend errors (this plugin has no backend), e.g. a project reload racing a file-based app being opened.
-                        if ("BackendException" in message + details && "com.wollumestudios" !in details) return println("Ignored Rider backend error in $testName: $message")
-                        fail { "$testName fails: $message.\n$details" }
-                    }
-                }
-            }
-        }
-    }
+class ReplSmokeUiTest : UiTestBase() {
 
     @Test
     fun `runs code, shows variables and references a solution project`() = withRider("smoke") {
@@ -168,6 +150,44 @@ class ReplSmokeUiTest {
         }
         println("history colors: ${historyColors.mapValues { Integer.toHexString(it.value) }}")
         checkColored("history", code, historyColors)
+
+        // Semantic colors with Rider's C# keys: method calls, an extension method, a lambda parameter, a local, a type.
+        panelUi.enter("int Twice(int n) => n * 2;")
+        waitFor("Twice declared", timeout = 1.minutes) { session.getHistory().any { it.getCode().startsWith("int Twice") && it.getStatus() == "ok" } }
+        val semantic = "var list = new List<int>{1,2}; list.Select(x => x * 2).Sum() + Twice(1)"
+        panelUi.enter(semantic)
+        waitFor("the semantic sample ran", timeout = 1.minutes) { session.getHistory().any { it.getCode() == semantic && it.getResult() == "8" } }
+        val history = withContext(OnDispatcher.EDT) { panel.getHistory() }
+        val historyStart = withContext(OnDispatcher.EDT) { history.getDocument().getText().lastIndexOf(semantic) }
+        checkSemantic("history", semantic, semanticColors(history, historyStart, semantic))
+        withWriteAction { panel.getInput().setText(semantic) }
+        val inputSemantic = waitNotNull("semantic colors in the input", timeout = 1.minutes) {
+            semanticColors(editor, 0, semantic).takeIf { it.keys.containsAll(listOf("Select", "Sum", "x", "Twice")) }
+        }
+        checkSemantic("input", semantic, inputSemantic)
+        Thread.sleep(1000) // repaint
+        shot("repl-semantic", rectOf(panelUi.component))
+    }
+
+    /** Token → (key, foreground) of the highlighters with Rider's C# keys inside [code], which starts at [start] in [editor]. */
+    private fun Driver.semanticColors(editor: EditorRef, start: Int, code: String): Map<String, List<Pair<String, Int?>>> = withContext(OnDispatcher.EDT) {
+        val text = editor.getDocument().getText()
+        editor.getMarkupModel().getAllHighlighters()
+            .filter { h -> h.getStartOffset() >= start && h.getEndOffset() <= start + code.length && h.getTextAttributesKey()?.getExternalName()?.startsWith("ReSharper.CSHARP_") == true }
+            .groupBy({ h -> text.substring(h.getStartOffset(), h.getEndOffset()) }) { h -> h.getTextAttributesKey()!!.getExternalName() to h.getTextAttributes(editor.getColorsScheme())?.getForegroundColor()?.getRGB() }
+    }
+
+    /** Select and Sum (extension method calls), Twice (a method call) and both `x` (the lambda parameter) carry Rider's keys and a color that is not plain text's. */
+    private fun Driver.checkSemantic(where: String, code: String, colors: Map<String, List<Pair<String, Int?>>>) {
+        println("$where semantic colors: ${colors.mapValues { (_, v) -> v.map { (k, c) -> k.removePrefix("ReSharper.CSHARP_") + "=" + c?.let(Integer::toHexString) } }}")
+        val plain = withContext(OnDispatcher.EDT) { utility(EditorColorsManagerRef::class).getInstance().getGlobalScheme().getDefaultForeground().getRGB() }
+        val expected = mapOf("Select" to "EXTENSION_METHOD_CALL", "Sum" to "EXTENSION_METHOD_CALL", "Twice" to "METHOD_CALL", "x" to "PARAMETER", "list" to "LOCAL_VARIABLE", "List" to "CLASS")
+        for ((token, key) in expected) {
+            val got = colors[token] ?: fail("$where: `$token` has no semantic highlighter in `$code`: $colors")
+            check(got.all { it.first == "ReSharper.CSHARP_${key}_IDENTIFIER" }) { "$where: `$token` has ${got.map { it.first }}, expected $key" }
+            if (token != "list" && token != "List") check(got.all { it.second != null && it.second != plain }) { "$where: `$token` is plain text's color: $got" }
+        }
+        check(colors.getValue("x").size == 2) { "$where: both x of the lambda: ${colors["x"]}" }
     }
 
     /** The keyword `var`, the string and the comment of `var s = "hi"; // c` each have a non-default color, three different ones. */
@@ -180,14 +200,6 @@ class ReplSmokeUiTest {
     private fun Driver.tryAction(id: String, component: com.intellij.driver.sdk.ui.remote.Component): Boolean = withContext(OnDispatcher.EDT) {
         val actions = service(com.intellij.driver.sdk.ActionManager::class)
         !actions.tryToExecute(actions.getAction(id) ?: fail("no action $id"), null, component, null, true).isRejected()
-    }
-
-    /** Types [text] into [editor] character by character through the editor's typing action (as the keyboard does: typed handlers, lookup). */
-    private fun Driver.type(editor: EditorRef, text: String) {
-        for (c in text) withContext(OnDispatcher.EDT) {
-            val context = utility(DataManagerRef::class).getInstance().getDataContext(editor.getContentComponent())
-            utility(TypedActionRef::class).getInstance().actionPerformed(editor, c, context)
-        }
     }
 
     /**
@@ -328,38 +340,6 @@ class ReplSmokeUiTest {
         return process.waitFor() to out
     }
 
-    /** Opens Solution Explorer and selects the Greeter project node (through the tree's API: robot clicks need the IDE in front). */
-    private fun Driver.selectGreeter(): JTreeUiComponent {
-        openToolWindow("Project")
-        val tree = ideFrame().x(JTreeUiComponent::class.java) { byType("com.jetbrains.rider.projectView.views.impl.SolutionViewTree") }
-        val greeter = waitNotNull("Greeter in Solution Explorer", timeout = 5.minutes) {
-            val paths = tree.collectExpandedPaths()
-            paths.firstOrNull { it.path.lastOrNull()?.startsWith("Greeter") == true }
-                ?: null.also { println("Solution Explorer: $paths"); paths.filter { it.path.size == 1 }.forEach { tree.fixture.expandRow(it.row) } }
-        }
-        waitFor("Greeter selected", timeout = 1.minutes) {
-            // Through the tree's API, not the fixture's robot click: that needs the test IDE in front (it fails while another window has focus).
-            withContext(OnDispatcher.EDT) { cast(tree.component, JTree::class).setSelectionRow(greeter.row) }
-            val selected = tree.collectSelectedPaths().map { it.path }
-            println("Solution Explorer: row ${greeter.row} ${greeter.path}; selected: $selected")
-            selected.singleOrNull()?.lastOrNull()?.startsWith("Greeter") == true
-        }
-        return tree
-    }
-
-    /** Types [code] into the REPL input and presses Enter (the action the input binds to Enter). */
-    private fun UiComponent.enter(code: String) {
-        val panel = driver.cast(component, ReplPanel::class)
-        driver.withWriteAction { panel.getInput().setText(code) }
-        driver.invokeAction("CSharpRepl.Enter", component = component)
-    }
-
-    /** The Name cell's text without the tree's expander (anything before the name, e.g. an arrow or +/-). */
-    private fun nameCell(text: String) = text.trim().replace(Regex("""^[^\p{L}\p{N}_$]+"""), "").trim()
-
-    private fun ReplSession.historyText() =
-        getHistory().joinToString("\n") { "[${it.getStatus()}] ${it.getCode()} ${it.getOutput()} ${it.getResult() ?: ""} ${it.getException() ?: ""}" }
-
     /**
      * The window was open when the IDE closed, so the next start restores it visible (workspace window_info
      * visible="true") and creates its content while the project is still opening.
@@ -435,9 +415,6 @@ class ReplSmokeUiTest {
         check(table.isShowing() && table.width > 0) { "$name: variables table not painted\n$dump" }
     }
 
-    private fun Driver.toolWindow(): ToolWindowRef =
-        utility(ToolWindowManagerRef::class).getInstance(singleProject()).getToolWindow("C# REPL") ?: fail("No C# REPL tool window")
-
     private fun Driver.dump(c: com.intellij.driver.sdk.ui.remote.Component, depth: Int, out: StringBuilder) {
         out.append("  ".repeat(depth)).append(c.getClass().getName()).append(" [${c.x},${c.y} ${c.width}x${c.height}]")
             .append(if (c.isShowing()) " showing" else " NOT showing").append('\n')
@@ -445,84 +422,6 @@ class ReplSmokeUiTest {
         if (depth < 12 && !c.getClass().getName().startsWith("com.intellij.openapi.editor.impl.")) // editors: deep and not ours
             for (i in 0 until container.getComponentCount()) dump(container.getComponent(i), depth + 1, out)
     }
-
-    /**
-     * The IDE frame as Swing paints it, rendered in the IDE into an image: unlike a Robot screen capture it works while
-     * the test IDE is behind other windows or on another monitor.
-     */
-    private fun Driver.shot(name: String) {
-        val frame = ideFrame().component
-        Files.createDirectories(screenshots)
-        val file = screenshots.resolve("$name.png").toAbsolutePath().toString()
-        withContext(OnDispatcher.EDT) {
-            val image = new(BufferedImageRef::class, frame.width, frame.height, 1 /* TYPE_INT_RGB */)
-            val g = image.createGraphics()
-            cast(frame, AwtComponentRef::class).paintAll(g)
-            // Popups (completion lookup, menus) that left the frame's layered pane are windows of their own.
-            val origin = cast(frame, AwtComponentRef::class).getLocationOnScreen()
-            for (w in cast(frame, AwtWindowRef::class).getOwnedWindows()) {
-                val window = cast(w, AwtComponentRef::class)
-                if (!w.isShowing() || w.width <= 0) continue
-                val at = window.getLocationOnScreen()
-                val wg = g.create(at.x - origin.x, at.y - origin.y, w.width, w.height)
-                window.paintAll(wg)
-                wg.dispose()
-            }
-            g.dispose()
-            utility(ImageIORef::class).write(image, "png", new(FileRef::class, file))
-        }
-        println("Screenshot $name: $file")
-    }
-
-    private val screenshots: Path = Path.of(System.getProperty("csharprepl.screenshots", "build/screenshots"))
-
-    private fun withRider(name: String, test: Driver.() -> Unit) = riderContext(name).runRider(test)
-
-    private fun riderContext(name: String): IDETestContext {
-        val solution = sampleCopy().resolve("SampleSolution.sln")
-        val context = Starter.newContext(name, TestCase(rider(), SolutionProject(solution)))
-        PluginConfigurator(context).installPluginFromDir(Path.of(System.getProperty("csharprepl.plugin")))
-        // Fresh temp copy of the sample each run: without this, Rider asks to trust it (a dialog on the user's screen).
-        context.applyVMOptionsPatch { addSystemProperty("idea.trust.all.projects", true) }
-        return context
-    }
-
-    private fun IDETestContext.runRider(test: Driver.() -> Unit) {
-        // A cold Rider start (first run, busy machine) alone can take ~10 minutes.
-        runIdeWithDriver(runTimeout = 45.minutes).useDriverAndCloseIde {
-            waitForIndicators(30.minutes)
-            test()
-        }
-    }
-
-    private fun rider(): IdeInfo {
-        val path = System.getProperty("csharprepl.rider")?.let(Path::of)
-            ?: System.getenv("LOCALAPPDATA")?.let { Path.of(it, "Programs", "Rider") }
-            ?: fail("Set CSHARPREPL_RIDER to a Rider installation")
-        if (!path.exists()) fail("No Rider at $path; set CSHARPREPL_RIDER")
-        return IdeInfo.Rider.copy(getInstaller = { ExistingIdeInstaller(path) })
-    }
-
-    /** The sample without build output, so every run starts from the same sources and the repo stays clean. */
-    private fun sampleCopy(): Path {
-        val source = Path.of(System.getProperty("csharprepl.sample"))
-        val target = createTempDirectory("csharprepl-ui-").resolve(source.name)
-        Files.walk(source).use { paths ->
-            paths.filter { p -> source.relativize(p).none { it.name in setOf("bin", "obj", ".idea") } }.forEach { p ->
-                val dst = target.resolve(source.relativize(p).toString())
-                if (Files.isDirectory(p)) Files.createDirectories(dst) else Files.copy(p, dst)
-            }
-        }
-        return target
-    }
-}
-
-/** Opens a solution file: given its folder, Rider asks which solution to open (a modal dialog the test can't answer). */
-private class SolutionProject(private val solution: Path) : ProjectInfoSpec {
-    override val isReusable = true
-    override val downloadTimeout = 1.minutes
-    override val configureProjectBeforeUse: (IDETestContext) -> Unit = {}
-    override fun downloadAndUnpackProject(): Path = solution
 }
 
 private const val PLUGIN = "com.wollumestudios.csharprepl"
@@ -532,6 +431,18 @@ interface ReplPanel {
     fun getInput(): EditorTextField
     fun getHistory(): EditorRef
     fun getDrop(): ReferenceDropRef
+    fun getVariables(): VariablesViewRef
+}
+
+@Remote("com.wollumestudios.csharprepl.ui.VariablesView", plugin = PLUGIN)
+interface VariablesViewRef {
+    fun select(name: String)
+    fun getTable(): TreeTableRef
+}
+
+@Remote("com.intellij.ui.treeStructure.treetable.TreeTable")
+interface TreeTableRef {
+    fun getTree(): JTree
 }
 
 @Remote("com.intellij.openapi.editor.ex.EditorEx")
@@ -541,8 +452,15 @@ interface EditorRef {
     fun getColorsScheme(): ColorsSchemeRef
     fun getContentComponent(): com.intellij.driver.sdk.ui.remote.Component
     fun getDocument(): DocumentRef
+    fun getCaretModel(): CaretModelRef
+    fun getComponent(): com.intellij.driver.sdk.ui.remote.Component
     fun getGutter(): GutterRef
     fun getVirtualFile(): com.intellij.driver.sdk.VirtualFile
+}
+
+@Remote("com.intellij.openapi.editor.CaretModel")
+interface CaretModelRef {
+    fun moveToOffset(offset: Int)
 }
 
 @Remote("com.intellij.openapi.editor.Document")
@@ -579,6 +497,17 @@ interface ColorsSchemeRef {
     fun getDefaultForeground(): ColorRef
 }
 
+@Remote("com.intellij.openapi.editor.colors.TextAttributesKey")
+interface TextAttributesKeyRef {
+    fun getExternalName(): String
+}
+
+@Remote("com.intellij.openapi.editor.colors.EditorColorsManager")
+interface EditorColorsManagerRef {
+    fun getInstance(): EditorColorsManagerRef
+    fun getGlobalScheme(): ColorsSchemeRef
+}
+
 @Remote("com.intellij.openapi.editor.markup.MarkupModel")
 interface MarkupModelRef {
     fun getAllHighlighters(): Array<RangeHighlighterRef>
@@ -588,6 +517,7 @@ interface MarkupModelRef {
 interface RangeHighlighterRef {
     fun getStartOffset(): Int
     fun getEndOffset(): Int
+    fun getTextAttributesKey(): TextAttributesKeyRef?
     fun getTextAttributes(scheme: ColorsSchemeRef?): TextAttributesRef?
 }
 
@@ -599,6 +529,7 @@ interface LookupManagerRef {
 @Remote("com.intellij.codeInsight.lookup.Lookup")
 interface LookupRef {
     fun getItems(): List<LookupElementRef>
+    fun getComponent(): com.intellij.driver.sdk.ui.remote.Component
 }
 
 @Remote("com.intellij.codeInsight.lookup.LookupElement")
@@ -626,6 +557,7 @@ interface TypedActionRef {
 interface ToolWindowManagerRef {
     fun getInstance(project: com.intellij.driver.sdk.Project): ToolWindowManagerRef
     fun getToolWindow(id: String): ToolWindowRef?
+    fun setMaximized(window: ToolWindowRef, maximized: Boolean)
 }
 
 @Remote("com.intellij.openapi.wm.ToolWindow")
@@ -652,6 +584,7 @@ interface AwtContainer {
 @Remote("java.awt.image.BufferedImage")
 interface BufferedImageRef {
     fun createGraphics(): GraphicsRef
+    fun getSubimage(x: Int, y: Int, w: Int, h: Int): BufferedImageRef
 }
 
 @Remote("java.awt.Graphics")
@@ -671,6 +604,7 @@ interface AwtComponentRef {
 @Remote("java.awt.Window")
 interface AwtWindowRef {
     fun getOwnedWindows(): Array<com.intellij.driver.sdk.ui.remote.Component>
+    fun setBounds(x: Int, y: Int, width: Int, height: Int)
 }
 
 @Remote("javax.imageio.ImageIO")
@@ -694,6 +628,38 @@ interface JBPopupRef {
     fun cancel()
 }
 
+@Remote("com.intellij.openapi.ui.popup.ListPopup")
+interface ListPopupRef {
+    fun getListStep(): ListPopupStepRef
+}
+
+@Remote("com.intellij.openapi.ui.popup.ListPopupStep")
+interface ListPopupStepRef {
+    fun getValues(): List<AnyRef>
+}
+
+@Remote("com.intellij.ui.popup.PopupFactoryImpl\$ActionItem")
+interface ActionItemRef {
+    fun getText(): String
+    fun getAction(): AnActionRef
+}
+
+@Remote("com.intellij.openapi.ui.DialogWrapper")
+interface DialogWrapperRef {
+    fun findInstance(c: com.intellij.driver.sdk.ui.remote.Component): DialogWrapperRef?
+    fun doCancelAction()
+}
+
+@Remote("javax.swing.JList")
+interface JListModelRef {
+    fun getModel(): ListModelRef
+}
+
+@Remote("javax.swing.ListModel")
+interface ListModelRef {
+    fun getSize(): Int
+}
+
 @Remote("javax.swing.JList")
 interface JListRef {
     fun setSelectedIndex(index: Int)
@@ -710,6 +676,8 @@ interface FileRef {
 @Remote("javax.swing.JTree")
 interface JTree {
     fun setSelectionRow(row: Int)
+    fun getSelectionRows(): IntArray?
+    fun expandRow(row: Int)
 }
 
 @Remote("com.intellij.ui.EditorTextField")
@@ -722,6 +690,7 @@ interface EditorTextField {
 @Remote("com.wollumestudios.csharprepl.ReplSession", plugin = PLUGIN)
 interface ReplSession {
     fun getHistory(): List<HistoryEntry>
+    fun getChangedProject(): String?
 }
 
 @Remote("com.wollumestudios.csharprepl.HistoryEntry", plugin = PLUGIN)

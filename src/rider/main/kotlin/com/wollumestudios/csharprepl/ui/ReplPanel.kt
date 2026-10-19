@@ -57,6 +57,7 @@ import com.wollumestudios.csharprepl.EnterAction
 import com.wollumestudios.csharprepl.InputHistory
 import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.combine
+import com.wollumestudios.csharprepl.indented
 import com.wollumestudios.csharprepl.host.Var
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import com.wollumestudios.csharprepl.settings.ReplSettingsListener
@@ -121,6 +122,7 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         border = JBUI.Borders.compound(JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0), JBUI.Borders.empty(2, 4))
     }
     val completion = InputCompletion(project, input, parent)
+    private val semantic = InputSemanticHighlighting(project, input, parent)
     private val inputHistory = InputHistory { session.history.filter { it.status != "note" }.map { it.code } }
 
     private val pendingText = JBTextArea().apply {
@@ -302,7 +304,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             }
             history.caretModel.moveToOffset(history.document.textLength)
             history.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+            semantic.schedule() // a run declared or redeclared names the input may use
         }
+        if (pendingText.text != session.pending) semantic.schedule() // the input is classified after the pending code
         pendingText.text = session.pending
         pendingBox.isVisible = session.pending.isNotEmpty()
         banner.show(session.changedProject)
@@ -331,7 +335,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     private fun render(e: HistoryEntry) {
         if (e.status == "note") return append(e.output + "\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         append("> ", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
+        val codeStart = cursor
         appendCode(e.code.replace("\n", "\n  ") + "\n")
+        addSemanticHighlighters(history.markupModel, codeStart, indented(e.spans, e.code, 2))
         if (e.status == "running") append("  (running…)\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         if (e.output.isNotEmpty()) append(indent(e.output.trimEnd('\n', '\r')) + "\n", null)
         e.result?.let { appendCode(indent(it) + "\n") }

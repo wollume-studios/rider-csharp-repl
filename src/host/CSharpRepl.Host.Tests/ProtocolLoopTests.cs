@@ -96,6 +96,24 @@ public class ProtocolLoopTests
     }
 
     [Fact]
+    public async Task Loop_AnswersClassifyWhileRunIsBusy_AndRunSendsSpans()
+    {
+        using var s = new Session();
+        await s.Send(new { id = 1, cmd = "run", code = "System.Threading.Thread.Sleep(2000); var abc = 1;" });
+        await s.Send(new { id = 2, cmd = "classify", code = "Math.Max(1, 2)" });
+
+        var first = await s.Receive();
+        Assert.Equal(2, first.GetProperty("id").GetInt32());
+        var spans = first.GetProperty("spans").EnumerateArray().Select(e => (e.GetProperty("start").GetInt32(), e.GetProperty("length").GetInt32(), e.GetProperty("kind").GetString())).ToList();
+        Assert.Contains((5, 3, "staticMethod"), spans);
+
+        var run = await s.Receive();
+        Assert.Equal(1, run.GetProperty("id").GetInt32());
+        Assert.Contains(run.GetProperty("spans").EnumerateArray(), e => e.GetProperty("kind").GetString() == "staticMethod" && e.GetProperty("length").GetInt32() == 5); // Sleep
+        await s.Finish();
+    }
+
+    [Fact]
     public async Task Loop_UnicodeRoundTrip()
     {
         using var s = new Session();

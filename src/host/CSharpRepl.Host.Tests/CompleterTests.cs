@@ -111,7 +111,7 @@ public class CompleterTests
         Assert.Equal("0", engine.GetVariables().Single(v => v.Name == "hits").Value);
     }
 
-    private static string Fixture(string name)
+    internal static string Fixture(string name)
     {
         for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
             if (File.Exists(Path.Combine(d.FullName, "Fixtures", name, name + ".csproj")))
