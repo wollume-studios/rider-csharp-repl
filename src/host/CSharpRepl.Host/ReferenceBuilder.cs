@@ -39,7 +39,10 @@ public static partial class ReferenceBuilder
         return snapshot;
     }
 
-    /// <summary>Deletes snapshots older than a day unless another host still holds their `.inuse` lock.</summary>
+    /// <summary>
+    /// Deletes every snapshot no live host holds (`.inuse` lock), so restarts don't pile them up: the frontend kills the
+    /// old host before starting the next one. Snapshots younger than a minute are skipped (another host may be creating one).
+    /// </summary>
     public static void CleanOldSnapshots()
     {
         if (!Directory.Exists(RefsRoot)) return;
@@ -47,7 +50,7 @@ public static partial class ReferenceBuilder
         {
             try
             {
-                if (Directory.GetLastWriteTimeUtc(dir) >= DateTime.UtcNow.AddDays(-1)) continue;
+                if (Directory.GetLastWriteTimeUtc(dir) >= DateTime.UtcNow.AddMinutes(-1)) continue;
                 using (new FileStream(Path.Combine(dir, InUse), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) { } // throws while held
                 Directory.Delete(dir, true);
             }

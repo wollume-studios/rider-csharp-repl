@@ -50,7 +50,13 @@ val uiTest by tasks.registering(Test::class) {
     val uiTestSources = sourceSets.getByName("uiTest")
     testClassesDirs = uiTestSources.output.classesDirs
     classpath = uiTestSources.runtimeClasspath
-    useJUnitPlatform { excludeEngines("junit-vintage") } // Starter brings the vintage engine without JUnit 4
+    // Starter brings the vintage engine without JUnit 4. The docs/screenshots PNGs (ScreenshotsUiTest) only with
+    // -PuiTestScreenshots, and then only those.
+    val screenshots = providers.gradleProperty("uiTestScreenshots").isPresent
+    useJUnitPlatform {
+        excludeEngines("junit-vintage")
+        if (screenshots) includeTags("screenshots") else excludeTags("screenshots")
+    }
     val prepareSandbox = tasks.named<PrepareSandboxTask>("prepareSandbox")
     dependsOn(prepareSandbox)
     val pluginDir = prepareSandbox.flatMap { it.pluginDirectory }
@@ -62,6 +68,7 @@ val uiTest by tasks.registering(Test::class) {
             // Sample copies and their build output: on disk, not in a small /tmp RAM disk.
             "-Djava.io.tmpdir=${layout.buildDirectory.dir("ui-test-tmp").get().asFile.apply { mkdirs() }.absolutePath}",
             "-Dcsharprepl.screenshots=${layout.buildDirectory.dir("screenshots").get().asFile.absolutePath}",
+            "-Dcsharprepl.docsScreenshots=${file("docs/screenshots").absolutePath}",
             rider.orNull?.let { "-Dcsharprepl.rider=$it" },
         )
     }

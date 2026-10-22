@@ -144,6 +144,25 @@ public class ReferenceBuilderTests
     }
 
     [Fact]
+    public async Task HashRNuGet_AlreadyReferenced_IsNotBuiltAgain()
+    {
+        var engine = new ReplEngine();
+        await engine.RunAsync("#r \"nuget: Humanizer.Core, 2.14.1\"");
+        var old = Environment.GetEnvironmentVariable("CSHARPREPL_DOTNET");
+        Environment.SetEnvironmentVariable("CSHARPREPL_DOTNET", Path.Combine(Path.GetTempPath(), "no-such-dir", "dotnet.exe")); // a second build would fail
+        try
+        {
+            var r = await engine.RunAsync("#r \"nuget: Humanizer.Core, 2.14.1\"\nHumanizer.StringHumanizeExtensions.Humanize(\"a_b\")");
+            Assert.Equal(SubmissionStatus.Ok, r.Status);
+            Assert.Equal("\"a b\"", r.Result);
+            Assert.Empty(r.AddedReferences);
+            Assert.Single(engine.References);
+            Assert.Single(Directives.For(engine.References, Path.Combine(Path.GetTempPath(), "x.cs")).Split('\n'), l => l.StartsWith("#:package"));
+        }
+        finally { Environment.SetEnvironmentVariable("CSHARPREPL_DOTNET", old); }
+    }
+
+    [Fact]
     public async Task MissingDotnet_ThrowsReferenceException()
     {
         var old = Environment.GetEnvironmentVariable("CSHARPREPL_DOTNET");
@@ -157,23 +176,24 @@ public class ReferenceBuilderTests
     }
 
     [Fact]
-    public void CleanOldSnapshots_DeletesOnlyOldDirs()
+    public void CleanOldSnapshots_DeletesUnusedDirsOlderThanAMinute()
     {
         var refs = Path.Combine(ReferenceBuilder.DataRoot, "refs");
-        var (old, fresh) = (Path.Combine(refs, "old-test"), Path.Combine(refs, "fresh-test"));
+        var (old, fresh) = (Path.Combine(refs, "old-" + Guid.NewGuid()), Path.Combine(refs, "fresh-" + Guid.NewGuid()));
         Directory.CreateDirectory(old);
         Directory.CreateDirectory(fresh);
-        Directory.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddDays(-2));
+        Directory.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddMinutes(-2)); // e.g. the previous host's, before a restart
         ReferenceBuilder.CleanOldSnapshots();
         Assert.False(Directory.Exists(old));
         Assert.True(Directory.Exists(fresh));
+        Directory.Delete(fresh);
     }
 
     [Fact]
     public void CleanOldSnapshots_KeepsSnapshotHeldByAnotherHost()
     {
         var refs = Path.Combine(ReferenceBuilder.DataRoot, "refs");
-        var (held, free) = (Path.Combine(refs, "held-test"), Path.Combine(refs, "free-test"));
+        var (held, free) = (Path.Combine(refs, "held-" + Guid.NewGuid()), Path.Combine(refs, "free-" + Guid.NewGuid()));
         Directory.CreateDirectory(held);
         Directory.CreateDirectory(free);
         using (new FileStream(Path.Combine(held, ".inuse"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) // what a live host holds

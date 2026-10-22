@@ -28,3 +28,4 @@ _dotTrace*
 out/
 allure-results/
 *.hprof
+.claude/worktrees/

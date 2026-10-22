@@ -73,4 +73,56 @@ class InputLogicTest {
         assertEquals(true, isStale(atKey, atKey.copy(generation = 2))) // Stop / restart / crash
         assertEquals(true, isStale(atKey, atKey.copy(resets = 1))) // Reset
     }
+
+    @Test
+    fun `host works in the solution folder, or the home folder when that folder is missing`() {
+        val dir = java.nio.file.Files.createTempDirectory("repl-wd")
+        val home = System.getProperty("java.io.tmpdir")
+        assertEquals(dir, workingDir(dir.toString(), home))
+        assertEquals(java.nio.file.Paths.get(home), workingDir(dir.resolve("missing").toString(), home))
+        assertEquals(java.nio.file.Paths.get(home), workingDir(null, home))
+    }
+}
+
+/** When typing pops completion up, and which span an answer replaces. */
+class CompletionLogicTest {
+    @Test
+    fun `identifier characters trigger, numbers do not`() {
+        assertEquals(true, autoTriggers("a"))
+        assertEquals(true, autoTriggers("var x = ab"))
+        assertEquals(true, autoTriggers("x1"))
+        assertEquals(true, autoTriggers("_"))
+        assertEquals(false, autoTriggers("1"))
+        assertEquals(false, autoTriggers("x = 12"))
+        assertEquals(false, autoTriggers("1e"))
+        assertEquals(false, autoTriggers(""))
+        assertEquals(false, autoTriggers("x "))
+        assertEquals(false, autoTriggers("f("))
+    }
+
+    @Test
+    fun `member access dot triggers, number and range dots do not`() {
+        assertEquals(true, autoTriggers("Console."))
+        assertEquals(true, autoTriggers("\"abc\"."))
+        assertEquals(true, autoTriggers("f()."))
+        assertEquals(true, autoTriggers("x1."))
+        assertEquals(false, autoTriggers("1."))
+        assertEquals(false, autoTriggers("a[1.."))
+        assertEquals(false, autoTriggers("."))
+    }
+
+    @Test
+    fun `the prefix is the replaced span, which must end at the caret`() {
+        assertEquals("Wr", lookupPrefix("Console.Wr", 10, 8, 2))
+        assertEquals("", lookupPrefix("\"abc\".", 6, 6, 0))
+        assertEquals(null, lookupPrefix("Console.Wr", 9, 8, 2)) // caret moved
+        assertEquals(null, lookupPrefix("ab", 2, 0, 3))
+        assertEquals(null, lookupPrefix("ab", 2, -1, 3))
+    }
+
+    @Test
+    fun `identifier start`() {
+        assertEquals(8, identifierStart("Console.Wr", 10))
+        assertEquals(11, identifierStart("Console.Wr ", 11))
+    }
 }

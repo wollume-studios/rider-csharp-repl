@@ -19,6 +19,9 @@ public sealed record RunResult(SubmissionStatus Status, string Output, string? R
 {
     /// <summary>References the run's `#r "nuget: ..."` lines added to the session (the frontend re-adds them on later hosts).</summary>
     public ReferenceInfo[] AddedReferences { get; init; } = [];
+
+    /// <summary>The code's identifiers classified against the session as it was before the run (the history's semantic colors).</summary>
+    public IReadOnlyList<SemanticSpan> Spans { get; init; } = [];
 }
 
 public sealed record VarInfo(string Name, string Type, string Value, int? Handle);
@@ -50,9 +53,10 @@ public sealed partial class ReplEngine
     // Default references: the shared framework's own assemblies (the scripting default set is too small on .NET Core).
     internal static readonly ScriptOptions BaseOptions = ScriptOptions.Default
         .WithReferences(FrameworkFiles.Select(f => MetadataReference.CreateFromFile(f)))
-        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
+        .WithImports("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Text", "System.Threading.Tasks");
 
-    private ScriptOptions _options = BaseOptions;
+    // Volatile: `complete` reads both off the sequential worker, which replaces them.
+    private volatile ScriptOptions _options = BaseOptions;
 
     private readonly List<ReferenceInfo> _references = new();
 
@@ -64,7 +68,7 @@ public sealed partial class ReplEngine
 
     private readonly SemaphoreSlim _gate = new(1, 1); // Console redirection is process-wide: one run at a time
     private readonly List<Submission> _submissions = new();
-    private ScriptState<object>? _state;
+    private volatile ScriptState<object>? _state;
     private Exception? _lastException;
     private readonly Dictionary<int, object> _handles = new(); // expandable values from the last variables/expand answers; cleared on every run
     private int _nextHandle;
@@ -114,10 +118,13 @@ public sealed partial class ReplEngine
             var added = new List<ReferenceInfo>();
             foreach (Match m in NuGetDirective().Matches(code))
             {
-                try { await AddReferenceAsync("nuget", null, m.Groups[1].Value, m.Groups[2].Value); }
+                var info = new ReferenceInfo("nuget", m.Groups[1].Value, m.Groups[2].Value);
+                if (References.Contains(info)) continue; // already in the session (re-added after a restart, or a replayed #r): no second restore and snapshot
+                try { await AddReferenceAsync("nuget", null, info.PathOrName, info.Version); }
                 catch (ReferenceException e) { return new RunResult(SubmissionStatus.CompileError, "", null, [e.Message], null) { AddedReferences = [.. added] }; }
-                added.Add(new ReferenceInfo("nuget", m.Groups[1].Value, m.Groups[2].Value));
+                added.Add(info);
             }
+            var spans = SafeClassify(code); // the code as sent (the frontend's offsets), before the run changes the state
             code = NuGetDirective().Replace(code, "");
             if (string.IsNullOrWhiteSpace(code)) return new RunResult(SubmissionStatus.Ok, "", null, [], null) { AddedReferences = [.. added] };
 
@@ -133,7 +140,7 @@ public sealed partial class ReplEngine
                 _lastException = null;
                 Record(code, SubmissionStatus.CompileError);
                 return new RunResult(SubmissionStatus.CompileError, output.ToString(), null,
-                    e.Diagnostics.Select(d => d.ToString()).ToArray(), null) { AddedReferences = [.. added] };
+                    e.Diagnostics.Select(d => d.ToString()).ToArray(), null) { AddedReferences = [.. added], Spans = spans };
             }
 
             _state = next;
@@ -141,13 +148,13 @@ public sealed partial class ReplEngine
             if (next.Exception is { } ex)
             {
                 Record(code, SubmissionStatus.Threw);
-                return new RunResult(SubmissionStatus.Threw, output.ToString(), null, [], $"{ex.GetType().Name}: {ex.Message}") { AddedReferences = [.. added] };
+                return new RunResult(SubmissionStatus.Threw, output.ToString(), null, [], $"{ex.GetType().Name}: {ex.Message}") { AddedReferences = [.. added], Spans = spans };
             }
 
             Record(code, SubmissionStatus.Ok);
             // ponytail: a trailing expression that evaluates to null is indistinguishable from no expression
             var result = next.ReturnValue is { } v ? ValueFormatter.Display(v) : null;
-            return new RunResult(SubmissionStatus.Ok, output.ToString(), result, [], null) { AddedReferences = [.. added] };
+            return new RunResult(SubmissionStatus.Ok, output.ToString(), result, [], null) { AddedReferences = [.. added], Spans = spans };
         }
         finally
         {
@@ -230,6 +237,19 @@ public sealed partial class ReplEngine
 
     public (string Text, string[] Warnings) Export(string filePath, bool excludeThrown) =>
         SessionExporter.Export(Submissions, excludeThrown, Directives.For(References, filePath), _options);
+
+    /// <summary>Completion at [position] in [code] as the next submission. Compiles only (never runs code), so it is safe beside a running submission.</summary>
+    public CompleteResponse Complete(string code, int position) => Completer.Complete(_state, _options, code, position);
+
+    /// <summary>Semantic classes of [code]'s identifiers as the next submission. Compiles only, so it is safe beside a running submission.</summary>
+    public IReadOnlyList<SemanticSpan> Classify(string code) => Classifier.Classify(_state, _options, code);
+
+    // Colors are a nicety: a classification failure must never fail the run.
+    private IReadOnlyList<SemanticSpan> SafeClassify(string code)
+    {
+        try { return Classify(code); }
+        catch (Exception) { return []; }
+    }
 
     public IReadOnlyList<VarInfo> Expand(int handle)
     {

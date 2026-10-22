@@ -30,7 +30,11 @@ import com.intellij.openapi.editor.markup.HighlighterTargetArea
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.PlainSyntaxHighlighter
 import com.intellij.openapi.fileTypes.SyntaxHighlighter
+import com.intellij.openapi.fileTypes.SyntaxHighlighterBase
 import com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
+import com.intellij.lexer.DelegateLexer
+import com.intellij.lexer.Lexer
+import com.intellij.psi.tree.IElementType
 import com.intellij.openapi.keymap.KeymapUtil
 import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.impl.ActionButton
@@ -40,6 +44,7 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.ui.EditorTextField
 import com.intellij.ui.JBColor
@@ -53,6 +58,7 @@ import com.wollumestudios.csharprepl.EnterAction
 import com.wollumestudios.csharprepl.InputHistory
 import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.combine
+import com.wollumestudios.csharprepl.indented
 import com.wollumestudios.csharprepl.host.Var
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import com.wollumestudios.csharprepl.settings.ReplSettingsListener
@@ -70,10 +76,11 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private val csharp = FileTypeManager.getInstance().getFileTypeByExtension("cs")
     private val syntax = csharpHighlighter(project)
-    private val drop = ReferenceDrop(project)
+    val drop = ReferenceDrop(project)
     private val banner = ChangeBanner()
 
-    private val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
+    /** The read-only history editor (public for the UI test's highlighting check). */
+    val history = (EditorFactory.getInstance().createViewer(EditorFactory.getInstance().createDocument(""), project) as EditorEx).apply {
         UndoUtil.disableUndoFor(document)
         (this as? EditorImpl)?.setDropHandler(drop)
         settings.apply {
@@ -104,7 +111,19 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             settings.additionalLinesCount = 0
             setVerticalScrollbarVisible(true)
         }
-    }.apply { setFontInheritedFromLAF(false) }
+
+        // At least three lines high, so the input is an obvious place to type and not a one-line strip above the hint.
+        override fun getPreferredSize(): java.awt.Dimension = super.getPreferredSize().apply {
+            height = maxOf(height, (editor?.lineHeight ?: JBUI.scale(18)) * 3 + insets.top + insets.bottom)
+        }
+    }.apply {
+        setFontInheritedFromLAF(false)
+        setPlaceholder("Type C# here")
+        setShowPlaceholderWhenFocused(true)
+        border = JBUI.Borders.compound(JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0), JBUI.Borders.empty(2, 4))
+    }
+    val completion = InputCompletion(project, input, parent)
+    private val semantic = InputSemanticHighlighting(project, input, parent)
     private val inputHistory = InputHistory { session.history.filter { it.status != "note" }.map { it.code } }
 
     private val pendingText = JBTextArea().apply {
@@ -155,9 +174,12 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         bindOnInput("CSharpRepl.Enter", "ENTER")
         bindOnInput("CSharpRepl.ShiftEnter", "shift ENTER")
         bindOnInput("CSharpRepl.ClearInput", "ESCAPE")
-        onInput("UP", { !session.analyzing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
-        onInput("DOWN", { !session.analyzing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
+        bindOnInput("CSharpRepl.Complete", "ctrl SPACE", fallbackActionId = "CodeCompletion")
+        // While the completion lookup shows, these are disabled, so the keys reach the editor and its lookup handlers.
+        onInput("UP", { !session.analyzing && !completion.lookupShowing && caretLine() == 0 }) { inputHistory.up(input.text)?.let(::setInput) }
+        onInput("DOWN", { !session.analyzing && !completion.lookupShowing && caretLine() == lastLine() }) { inputHistory.down()?.let(::setInput) }
 
+        forwardHistoryFocusToInput()
         Disposer.register(parent) { EditorFactory.getInstance().releaseEditor(history) }
         ApplicationManager.getApplication().messageBus.connect(parent).subscribe(ReplSettings.TOPIC, ReplSettingsListener { applySettings() })
         session.addListener(parent, ::sync)
@@ -206,14 +228,37 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
         input.editor?.caretModel?.moveToOffset(text.length)
     }
 
+    /**
+     * Like a console: a click into the read-only history (without selecting text) or typing there moves focus to the
+     * input. Typed characters follow, because AWT redelivers key events queued behind a focus request to the new owner.
+     */
+    private fun forwardHistoryFocusToInput() {
+        val target = { input.editor?.contentComponent }
+        history.contentComponent.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseReleased(e: java.awt.event.MouseEvent) {
+                if (javax.swing.SwingUtilities.isLeftMouseButton(e) && !history.selectionModel.hasSelection()) target()?.requestFocus()
+            }
+        })
+        history.contentComponent.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                val printable = e.keyChar != java.awt.event.KeyEvent.CHAR_UNDEFINED && !Character.isISOControl(e.keyChar)
+                if (printable && !e.isControlDown && !e.isAltDown && !e.isMetaDown) {
+                    input.editor?.caretModel?.moveToOffset(input.document.textLength)
+                    target()?.requestFocus()
+                }
+            }
+        })
+    }
+
     private fun caretLine() = input.editor?.caretModel?.logicalPosition?.line ?: 0
 
     private fun lastLine() = maxOf(0, input.document.lineCount - 1)
 
-    private fun bindOnInput(actionId: String, defaultKeys: String) {
+    /** Binds [actionId] on the input: its keymap shortcuts if the user set any, else [fallbackActionId]'s (e.g. Basic Completion's), else [defaultKeys]. */
+    private fun bindOnInput(actionId: String, defaultKeys: String, fallbackActionId: String? = null) {
         val action = ActionUtil.wrap(actionId) // a wrapper: shortcuts of the registered (global) action must not be changed here
-        val keymap = KeymapUtil.getActiveKeymapShortcuts(actionId)
-        action.registerCustomShortcutSet(if (keymap.shortcuts.isNotEmpty()) keymap else CustomShortcutSet.fromString(defaultKeys), input)
+        val keymap = listOfNotNull(actionId, fallbackActionId).map(KeymapUtil::getActiveKeymapShortcuts).firstOrNull { it.shortcuts.isNotEmpty() }
+        action.registerCustomShortcutSet(keymap ?: CustomShortcutSet.fromString(defaultKeys), input)
     }
 
     private fun onInput(keys: String, enabled: () -> Boolean = { true }, run: () -> Unit) =
@@ -260,7 +305,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
             }
             history.caretModel.moveToOffset(history.document.textLength)
             history.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+            semantic.schedule() // a run declared or redeclared names the input may use
         }
+        if (pendingText.text != session.pending) semantic.schedule() // the input is classified after the pending code
         pendingText.text = session.pending
         pendingBox.isVisible = session.pending.isNotEmpty()
         banner.show(session.changedProject)
@@ -289,7 +336,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
     private fun render(e: HistoryEntry) {
         if (e.status == "note") return append(e.output + "\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         append("> ", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
+        val codeStart = cursor
         appendCode(e.code.replace("\n", "\n  ") + "\n")
+        addSemanticHighlighters(history.markupModel, codeStart, indented(e.spans, e.code, 2))
         if (e.status == "running") append("  (running…)\n", ConsoleViewContentType.SYSTEM_OUTPUT_KEY)
         if (e.output.isNotEmpty()) append(indent(e.output.trimEnd('\n', '\r')) + "\n", null)
         e.result?.let { appendCode(indent(it) + "\n") }
@@ -310,7 +359,9 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
 
     private fun indent(text: String) = "  " + text.replace("\n", "\n  ")
 
-    private fun append(text: String, key: TextAttributesKey?) {
+    // Documents take LF only: console output and ToString() results on Windows bring CRLF.
+    private fun append(raw: String, key: TextAttributesKey?) {
+        val text = StringUtil.convertLineSeparators(raw)
         val start = cursor
         history.document.insertString(start, text)
         cursor += text.length
@@ -321,7 +372,8 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
      * Lexes each piece of code on its own (not the whole document), so an unterminated comment or string in one entry
      * can't recolor the rest of the history.
      */
-    private fun appendCode(code: String) {
+    private fun appendCode(raw: String) {
+        val code = StringUtil.convertLineSeparators(raw)
         val start = cursor
         history.document.insertString(start, code)
         cursor += code.length
@@ -340,14 +392,37 @@ class ReplPanel(private val project: Project, parent: Disposable) : SimpleToolWi
          * C# lexer highlighting from Rider's frontend file type (com.jetbrains.rider.languages.fileTypes.csharp.CSharpFileType),
          * looked up by extension so there is no compile dependency on the Rider module. Fallback: the TextMate C# bundle when
          * the TextMate plugin is installed (looked up by name, so that dependency stays optional too), else plain text.
+         * Rider's lexer leaves contextual keywords (`var`, `await`, …) to the backend, which these editors don't have:
+         * [withContextualKeywords] colors them as keywords.
          */
         fun csharpHighlighter(project: Project): SyntaxHighlighter {
             val types = FileTypeManager.getInstance()
             SyntaxHighlighterFactory.getSyntaxHighlighter(types.getFileTypeByExtension("cs"), project, null)
-                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
+                ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return withContextualKeywords(it) }
             types.findFileTypeByName("textmate")?.let { tm -> SyntaxHighlighterFactory.getSyntaxHighlighter(tm, project, LightVirtualFile("repl.cs")) }
                 ?.takeUnless { it is PlainSyntaxHighlighter }?.let { return it }
             return PlainSyntaxHighlighter()
+        }
+
+        /** Contextual keywords that are almost never names in REPL code. */
+        private val CONTEXTUAL = setOf("var", "async", "await", "dynamic", "nameof", "record", "yield", "when", "init", "required", "with", "not", "and", "or", "global")
+
+        /**
+         * [base] with identifiers spelled like a [CONTEXTUAL] keyword lexed as the token type [base] gives `int`. The
+         * identifier and keyword token types are learned by lexing samples, so nothing depends on Rider's token classes.
+         */
+        fun withContextualKeywords(base: SyntaxHighlighter): SyntaxHighlighter {
+            fun typeOf(text: String) = base.highlightingLexer.run { start(text); tokenType }
+            val identifier = typeOf("x") ?: return base
+            val keyword = typeOf("int")?.takeIf { it != identifier && base.getTokenHighlights(it).isNotEmpty() } ?: return base
+            return object : SyntaxHighlighterBase() {
+                override fun getHighlightingLexer(): Lexer = object : DelegateLexer(base.highlightingLexer) {
+                    override fun getTokenType(): IElementType? = super.getTokenType().let {
+                        if (it == identifier && bufferSequence.subSequence(tokenStart, tokenEnd).toString() in CONTEXTUAL) keyword else it
+                    }
+                }
+                override fun getTokenHighlights(tokenType: IElementType): Array<TextAttributesKey> = base.getTokenHighlights(tokenType)
+            }
         }
 
         /**

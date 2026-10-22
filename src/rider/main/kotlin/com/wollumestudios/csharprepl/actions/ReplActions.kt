@@ -16,18 +16,13 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.DumbAwareToggleAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
-import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.wm.ToolWindowManager
-import com.intellij.ui.components.JBTextField
-import com.intellij.ui.dsl.builder.COLUMNS_MEDIUM
-import com.intellij.ui.dsl.builder.COLUMNS_SHORT
-import com.intellij.ui.dsl.builder.columns
-import com.intellij.ui.dsl.builder.panel
 import com.wollumestudios.csharprepl.ReplSession
 import com.wollumestudios.csharprepl.RestartMode
 import com.wollumestudios.csharprepl.displayName
 import com.wollumestudios.csharprepl.host.ReferenceInfo
+import com.wollumestudios.csharprepl.refs.NuGetPicker
 import com.wollumestudios.csharprepl.refs.ReferenceDrop
 import com.wollumestudios.csharprepl.refs.RiderProjectModel
 import java.io.File
@@ -138,7 +133,7 @@ class AddReferenceAction : DumbAwareAction("Add Reference…", "Reference a solu
             projects.forEach { f -> add(DumbAwareAction.create(f.nameWithoutExtension) { session.addReference(ReferenceDrop.projectReference(f)) }) }
             if (projects.isNotEmpty()) addSeparator()
             add(DumbAwareAction.create("DLL…") { chooseDll(project)?.let(session::addReference) })
-            add(DumbAwareAction.create("NuGet package…") { askNuGet(project)?.let(session::addReference) })
+            add(DumbAwareAction.create("NuGet package…") { NuGetPicker.choose(project)?.let(session::addReference) })
         }
         val popup = JBPopupFactory.getInstance().createActionGroupPopup("Add Reference", group, e.dataContext, JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, true)
         val anchor = e.inputEvent?.component
@@ -148,26 +143,6 @@ class AddReferenceAction : DumbAwareAction("Add Reference…", "Reference a solu
     private fun chooseDll(project: Project): ReferenceInfo? =
         FileChooser.chooseFile(FileChooserDescriptorFactory.createSingleFileDescriptor("dll").withTitle("Reference DLL"), project, null)
             ?.let { ReferenceDrop.dllReference(File(it.path)) }
-
-    private fun askNuGet(project: Project): ReferenceInfo? {
-        lateinit var name: JBTextField
-        lateinit var version: JBTextField
-        val form = panel {
-            row("Name:") { name = textField().columns(COLUMNS_MEDIUM).focused().validationOnApply { if (it.text.isBlank()) error("Enter the package name") else null }.component }
-            row("Version:") { version = textField().columns(COLUMNS_SHORT).validationOnApply { if (it.text.isBlank()) error("Enter the package version") else null }.component }
-        }
-        val dialog = object : DialogWrapper(project) {
-            init {
-                title = "Reference NuGet Package"
-                init()
-            }
-            override fun createCenterPanel() = form
-            override fun doValidateAll() = form.validateAll()
-        }
-        if (!dialog.showAndGet()) return null
-        if (name.text.isBlank() || version.text.isBlank()) return null
-        return ReferenceInfo("nuget", name.text.trim(), version.text.trim())
-    }
 }
 
 /** Solution Explorer / Project view: "Reference in C# REPL" on project nodes only. */
@@ -242,10 +217,25 @@ class ToggleVariablesBelowAction : DumbAwareToggleAction("Variables Below Input"
     }
 }
 
-/** Enabled while the tool window exists and no Enter is waiting for `analyze`. */
+/**
+ * Enabled while the tool window exists, no Enter is waiting for `analyze` and no completion lookup shows in the input
+ * (then Enter, Tab and Escape go to the lookup: accept, close).
+ */
 abstract class InputAction(text: String, description: String) : DumbAwareAction(text, description, null) {
     override fun getActionUpdateThread() = ActionUpdateThread.EDT
     override fun update(e: AnActionEvent) {
-        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null && e.session?.analyzing != true
+        val panel = e.project?.let(ReplPanel::of)
+        e.presentation.isEnabled = panel != null && e.session?.analyzing != true && !panel.completion.lookupShowing
+    }
+}
+
+/** Ctrl+Space (Basic Completion's shortcut) in the input: completion now, from the session's variables, types and references. */
+class CompleteAction : DumbAwareAction("Complete Code in C# REPL", "Show completions for the identifier at the caret in the C# REPL input", null) {
+    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project?.let(ReplPanel::of) != null
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReplPanel.of(e.project ?: return)?.completion?.completeNow()
     }
 }

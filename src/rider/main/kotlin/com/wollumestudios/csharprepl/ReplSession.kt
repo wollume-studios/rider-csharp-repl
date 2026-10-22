@@ -13,7 +13,10 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.wollumestudios.csharprepl.host.AddReferenceResponse
+import com.wollumestudios.csharprepl.host.DotnetLocator
 import com.wollumestudios.csharprepl.host.AnalyzeResponse
+import com.wollumestudios.csharprepl.host.ClassifyResponse
+import com.wollumestudios.csharprepl.host.CompleteResponse
 import com.wollumestudios.csharprepl.host.DumpResponse
 import com.wollumestudios.csharprepl.host.ExpandResponse
 import com.wollumestudios.csharprepl.host.ExportResponse
@@ -22,6 +25,7 @@ import com.wollumestudios.csharprepl.host.HostProcess
 import com.wollumestudios.csharprepl.host.ReferenceInfo
 import com.wollumestudios.csharprepl.host.RestoreScriptResponse
 import com.wollumestudios.csharprepl.host.RunResponse
+import com.wollumestudios.csharprepl.host.SemanticSpan
 import com.wollumestudios.csharprepl.host.Var
 import com.wollumestudios.csharprepl.host.VariablesResponse
 import com.wollumestudios.csharprepl.refs.ProjectChangeListener
@@ -30,7 +34,6 @@ import com.wollumestudios.csharprepl.refs.WatchedProject
 import com.wollumestudios.csharprepl.settings.ReplSettings
 import java.io.File
 import java.io.IOException
-import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -47,6 +50,8 @@ data class HistoryEntry(
     val diagnostics: List<String> = emptyList(),
     val exception: String? = null,
     val restore: Boolean = false,
+    /** Semantic classes of [code]'s identifiers (offsets in [code]), from the host's `run` answer. */
+    val spans: List<SemanticSpan> = emptyList(),
 ) {
     companion object {
         fun note(text: String) = HistoryEntry("", "note", text)
@@ -182,7 +187,7 @@ class ReplSession(private val project: Project) : Disposable {
                 val done = if (json != null) gson.fromJson(json, RunResponse::class.java).let { r ->
                     // `#r "nuget: ..."` typed in code: later hosts re-add it and the gear lists it, as if added through the UI
                     r.addedReferences.orEmpty().forEach { if (it !in references) references += it }
-                    HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception, restore)
+                    HistoryEntry(code, r.status, r.output, r.result, r.diagnostics, r.exception, restore, r.spans.orEmpty())
                 }
                 else HistoryEntry(code, "error", exception = (error?.cause ?: error)?.message ?: "run failed", restore = restore)
                 replace(running, done)
@@ -205,6 +210,41 @@ class ReplSession(private val project: Project) : Disposable {
     }
 
     fun clearPending() = setPending("")
+
+    /**
+     * Completion at [caret] in [input] with the pending code before it (the host compiles pending + input as the next
+     * submission). Completes on the EDT with spans relative to [input], or null when there is no answer or it came from
+     * a host that has been replaced meanwhile. Never starts a host.
+     */
+    fun complete(input: String, caret: Int): CompletableFuture<CompleteResponse?> {
+        val result = CompletableFuture<CompleteResponse?>()
+        val gen = generation
+        val prefix = if (pending.isEmpty()) "" else pending + "\n"
+        request("complete", mapOf("code" to prefix + input, "position" to prefix.length + caret)).whenComplete { json, _ ->
+            onEdt {
+                val r = json?.takeIf { gen == generation }?.let { gson.fromJson(it, CompleteResponse::class.java) }
+                result.complete(r?.copy(start = r.start - prefix.length))
+            }
+        }
+        return result
+    }
+
+    /**
+     * Semantic classes of [input]'s identifiers, compiled after the pending code as the next submission. Completes on the
+     * EDT with spans relative to [input] (those in the pending code dropped), or null like [complete]. Never starts a host.
+     */
+    fun classify(input: String): CompletableFuture<List<SemanticSpan>?> {
+        val result = CompletableFuture<List<SemanticSpan>?>()
+        val gen = generation
+        val prefix = if (pending.isEmpty()) "" else pending + "\n"
+        request("classify", mapOf("code" to prefix + input)).whenComplete { json, _ ->
+            onEdt {
+                val spans = json?.takeIf { gen == generation }?.let { gson.fromJson(it, ClassifyResponse::class.java).spans.orEmpty() }
+                result.complete(spans?.let { relativeToInput(it, prefix.length) })
+            }
+        }
+        return result
+    }
 
     fun expand(handle: Int): CompletableFuture<List<Var>> =
         request("expand", mapOf("handle" to handle)).thenApply { gson.fromJson(it, ExpandResponse::class.java).children }
@@ -350,10 +390,12 @@ class ReplSession(private val project: Project) : Disposable {
         sessionStart = entries.size // what the history shows so far never ran in this host (0 after a reset)
         host = try {
             HostProcess(HostLocator.hostDll(), onExit = { code, killed -> if (!killed) onEdt { hostExited(gen, code) } }, log = LOG::info,
-                workingDir = project.basePath?.let { Paths.get(it) })
+                workingDir = workingDir(project.basePath))
         } catch (e: IOException) {
             LOG.warn(e)
-            val note = HistoryEntry.note("dotnet not found (PATH, DOTNET_ROOT, default install locations) — install the .NET 8+ SDK")
+            val note = HistoryEntry.note(
+                if (DotnetLocator.dotnet == null) "dotnet not found (PATH, DOTNET_ROOT, default install locations) — install the .NET 8+ SDK"
+                else "C# REPL host could not start: ${e.message}")
             if (history.lastOrNull() != note) append(note)
             null
         } ?: return
