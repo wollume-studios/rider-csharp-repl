@@ -35,6 +35,13 @@ Open the **C# REPL** tool window (bottom bar). Every feature is also an action (
 **Settings** (*Settings › Tools › C# REPL*, or ⚙): run on Enter (auto-run default), variables table right of the
 history or below the input (applied live), ignore changes to referenced projects forever.
 
+> **Known limitations**
+> - Exports and dumps are scratch files outside the solution. Rider 2026.3 may show incorrect errors in them (symbols
+>   marked as unresolved) although the file compiles and runs with *Run Single-File App* or `dotnet run`; Rider's
+>   support for file-based apps in scratch files is still unstable.
+> - This is an early version (0.x): expect rough edges and please report problems in the
+>   [issues](https://github.com/wollume-studios/rider-csharp-repl/issues).
+
 ## Screenshots
 
 ![C# REPL tool window](docs/screenshots/repl-window.png)

@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
     <id>com.wollumestudios.csharprepl</id>
     <name>C# REPL</name>
-    <vendor>Wollume Studios</vendor>
+    <vendor url="https://github.com/wollume-studios/rider-csharp-repl">Wollume Studios</vendor>
     <description><![CDATA[
         An interactive C# REPL for Rider: run C# snippets in a persistent Roslyn scripting session, inspect variables,
         reference projects, DLLs and NuGet packages, and export the session as a single-file app.

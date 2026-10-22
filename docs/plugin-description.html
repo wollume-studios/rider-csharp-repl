@@ -32,7 +32,7 @@ the session into a .NET 10 single-file app when it grows.</p>
 <ul>
   <li>Drag a project from Solution Explorer, or a <code>.csproj</code> / <code>.dll</code> from the file manager, onto
     the window; or <b>Reference in C# REPL</b> on a project node; or <b>+ Reference</b>: a solution project, a DLL or a
-    NuGet package (name and version). Projects are built first.</li>
+    NuGet package: a picker lists the packages your solution references and searches nuget.org, with a version list. Projects are built first.</li>
   <li>When a referenced project changes or is built, a banner offers <b>Rebuild</b>, <b>Rebuild and replay</b> the
     commands, or <b>Rebuild and restore variables</b>, or to ignore the change (once, for the session, forever).</li>
 </ul>
@@ -50,11 +50,18 @@ the session into a .NET 10 single-file app when it grows.</p>
   <li><b>New C# Single-File App</b> (File › New), <b>Add Project Reference Directive</b> (editor menu), and dropping a
     project onto a single-file app's editor inserts <code>#:project</code>.</li>
 </ul>
+<p><b>Note:</b> exports and dumps are scratch files outside the solution. Rider 2026.3 may mark their symbols as
+errors although the file compiles and runs (<b>Run Single-File App</b>, <code>dotnet run</code>); Rider's support for
+file-based apps in scratch files is still unstable.</p>
 <p><img src="{{screenshots}}/single-file-app.png" width="640" alt="A session exported as a single-file app"></p>
 
 <h3>Settings</h3>
 <p><i>Settings › Tools › C# REPL</i>: auto-run default, variables table right of the history or below the input, ignore
 project changes forever.</p>
+
+<h3>Status</h3>
+<p>Early version (0.x): expect rough edges. Please report problems on
+<a href="https://github.com/wollume-studios/rider-csharp-repl/issues">GitHub</a>.</p>
 
 <h3>Requirements</h3>
 <p>Rider 2026.3 or later. A .NET 8 or later runtime runs the session; referencing projects and NuGet packages needs a

@@ -1,5 +1,6 @@
 # Uploads the plugin to JetBrains Marketplace. The very first version must be uploaded by hand on
 # plugins.jetbrains.com; after that, run this workflow manually (EAP by default) or push a tag like v0.1.0 (Stable).
+# Without the JETBRAINS_MARKETPLACE secret the run only leaves a notice (e.g. for the first, manual release).
 name: Publish to JetBrains Marketplace
 
 on:
@@ -14,21 +15,29 @@ on:
 jobs:
   publish:
     runs-on: windows-latest
+    env:
+      PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE }}
     steps:
+      - name: No Marketplace token
+        if: env.PUBLISH_TOKEN == ''
+        run: echo "::notice::JETBRAINS_MARKETPLACE secret not set, skipping the upload"
       - uses: actions/checkout@v4
+        if: env.PUBLISH_TOKEN != ''
       - uses: actions/setup-dotnet@v4
+        if: env.PUBLISH_TOKEN != ''
         with:
           dotnet-version: |
             8.0.x
             10.0.x
       - uses: actions/setup-java@v4
+        if: env.PUBLISH_TOKEN != ''
         with:
           distribution: temurin
           java-version: 21
       - name: Tests
+        if: env.PUBLISH_TOKEN != ''
         run: dotnet test CSharpRepl.sln
       - name: Publish
+        if: env.PUBLISH_TOKEN != ''
         shell: bash
         run: ./gradlew publishPlugin -PPublishChannel="${{ github.event_name == 'push' && 'default' || github.event.inputs.channel || 'eap' }}" --console=plain
-        env:
-          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE }}
